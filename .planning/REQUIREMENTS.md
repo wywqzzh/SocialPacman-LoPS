@@ -7,10 +7,10 @@
 
 ### 任务接收
 
-- [ ] **INTK-01**: 用户可以为一轮重构提供外部目标脚本路径。
-- [ ] **INTK-02**: 用户可以说明目标脚本的运行环境、运行命令和必要权限。
-- [ ] **INTK-03**: 用户可以说明目标脚本依赖的数据来源和预期读取方式。
-- [ ] **INTK-04**: 每轮重构都有记录文件保存目标脚本、环境、数据和当前状态。
+- [x] **INTK-01**: 用户可以为一轮重构提供外部目标脚本路径。
+- [x] **INTK-02**: 用户可以说明目标脚本的运行环境、运行命令和必要权限。
+- [x] **INTK-03**: 用户可以说明目标脚本依赖的数据来源和预期读取方式。
+- [x] **INTK-04**: 每轮重构都有记录文件保存目标脚本、环境、数据和当前状态。
 
 ### 原始分析
 
@@ -78,10 +78,10 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| INTK-01 | Phase 1 | Pending |
-| INTK-02 | Phase 1 | Pending |
-| INTK-03 | Phase 1 | Pending |
-| INTK-04 | Phase 1 | Pending |
+| INTK-01 | Phase 1 | Complete |
+| INTK-02 | Phase 1 | Complete |
+| INTK-03 | Phase 1 | Complete |
+| INTK-04 | Phase 1 | Complete |
 | ANLY-01 | Phase 2 | Pending |
 | ANLY-02 | Phase 2 | Pending |
 | ANLY-03 | Phase 2 | Pending |

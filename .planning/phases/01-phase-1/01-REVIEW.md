@@ -11,20 +11,20 @@ findings:
 reviewed: 2026-05-03
 ---
 
-# Phase 01 Code Review
+# Phase 01 代码审查
 
-## Scope
+## 审查范围
 
 - `README.md`
 
-`.planning/` artifacts were excluded from source review scope according to the code-review workflow.
+根据代码审查流程，`.planning/` 规划产物不纳入源代码审查范围。
 
-## Findings
+## 审查结果
 
-No issues found.
+未发现问题。
 
-## Notes
+## 备注
 
-- `README.md` is documentation only.
-- The file avoids recording secrets and explicitly warns against storing API keys, passwords, tokens, or private credentials in intake files.
-- The file correctly scopes Phase 1 to the minimal entry skeleton and does not imply that concrete script refactoring has started.
+- `README.md` 仅包含项目说明文档。
+- 文档明确提醒不要在 intake 文件中记录 API keys、密码、token 或私有凭据。
+- 文档正确把 Phase 1 限定为最小入口骨架，没有暗示已经开始具体脚本重构。

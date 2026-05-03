@@ -28,60 +28,60 @@ duration: 1 min
 completed: 2026-05-03
 ---
 
-# Phase 1 Plan 01-01: 建立最小 run intake 模板 Summary
+# Phase 1 Plan 01-01: 建立最小 run intake 模板总结
 
 **中文 Markdown run intake 骨架，包含 `.planning/runs/` 目录约定和第一轮重构可复制模板**
 
-## Performance
+## 执行指标
 
-- **Duration:** 1 min
-- **Started:** 2026-05-03T15:20:53Z
-- **Completed:** 2026-05-03T15:21:57Z
-- **Tasks:** 2
-- **Files modified:** 2
+- **耗时:** 1 min
+- **开始:** 2026-05-03T15:20:53Z
+- **完成:** 2026-05-03T15:21:57Z
+- **任务数:** 2
+- **修改文件数:** 2
 
-## Accomplishments
+## 完成内容
 
 - 创建 `.planning/runs/README.md`，明确 run 目录命名、最低必填信息和安全提醒。
 - 创建 `.planning/runs/INTAKE-TEMPLATE.md`，提供第一轮重构可复制的中文 intake 模板。
 - 验证模板包含目标脚本路径、运行环境、数据来源、待补充字段和敏感信息提醒。
 
-## Task Commits
+## 任务提交
 
 1. **Task 1: 创建 run 目录说明** - `ce3ccd5` (`docs(01-01): add run directory guide`)
 2. **Task 2: 创建 intake 模板** - `07243d6` (`docs(01-01): add intake template`)
 
-## Files Created/Modified
+## 创建或修改的文件
 
 - `.planning/runs/README.md` - 说明 `.planning/runs/` 的用途、目录命名、最低必填信息和安全边界。
 - `.planning/runs/INTAKE-TEMPLATE.md` - 每轮重构的中文 Markdown intake 模板。
 
-## Decisions Made
+## 决策
 
-- None - followed plan as specified.
+- 无新增决策，按计划执行。
 
-## Deviations from Plan
+## 计划偏差
 
-None - plan executed exactly as written.
+无偏差，按计划执行。
 
-## Issues Encountered
+## 遇到的问题
 
-None.
+无。
 
-## User Setup Required
+## 用户需配置
 
-None - no external service configuration required.
+无，不需要配置外部服务。
 
-## Next Phase Readiness
+## 下阶段准备状态
 
-Plan 01-02 can now point README users to `.planning/runs/INTAKE-TEMPLATE.md` and `.planning/runs/YYYY-MM-DD-short-name/intake.md`.
+Plan 01-02 可以在 README 中指向 `.planning/runs/INTAKE-TEMPLATE.md` 和 `.planning/runs/YYYY-MM-DD-short-name/intake.md`。
 
-## Self-Check: PASSED
+## Self-Check: PASSED（自检通过）
 
-- `test -f .planning/runs/README.md` passed.
-- `test -f .planning/runs/INTAKE-TEMPLATE.md` passed.
-- Required strings for run naming, required fields, placeholders, and safety reminders were found with `grep -F`.
+- `test -f .planning/runs/README.md` 已通过。
+- `test -f .planning/runs/INTAKE-TEMPLATE.md` 已通过。
+- 已用 `grep -F` 找到 run 命名、必填字段、占位字段和安全提醒对应的必要字符串。
 
 ---
-*Phase: 01-phase-1*
-*Completed: 2026-05-03*
+*阶段: 01-phase-1*
+*完成日期: 2026-05-03*

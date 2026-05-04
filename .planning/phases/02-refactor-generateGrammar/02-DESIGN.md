@@ -248,6 +248,7 @@ class StrategyStateData:
     token_sequence: list[str]
     initial_tokens: list[str]
     state_features: pd.DataFrame
+    participant_file_names: list[str]
     participant_ids: list[str]
 ```
 
@@ -259,7 +260,8 @@ class StrategyStateData:
 - `token_sequence`: 旧字段 `seq` 转成的 token 序列。
 - `initial_tokens`: 旧字段 `S`，初始基础 token。
 - `state_features`: 旧字段 `state[state_names]`，和 token 序列按时间对齐的状态特征。
-- `participant_ids`: 旧字段 `fileNames` 去掉 `.pkl` 后得到的被试名列表。
+- `participant_file_names`: 旧字段 `fileNames` 的原始值，例如 `031222-401.pkl`，用于 `legacy["fileNames"]` 精确兼容。
+- `participant_ids`: 旧字段 `fileNames` 去掉 `.pkl` 后得到的被试名列表，用于 `structured` 输出。
 
 ### `PreparedStrategyStateData`
 
@@ -271,6 +273,7 @@ class PreparedStrategyStateData:
     n_positions: np.ndarray
     initial_tokens: list[str]
     state_features: pd.DataFrame
+    participant_file_names: list[str]
     participant_ids: list[str]
     state_dependencies: StateDependencyGraph
 ```
@@ -308,6 +311,7 @@ class GrammarLearningResult:
     parsed_sequence: list[str]
     parsed_state_features: pd.DataFrame
     active_tokens: list[str]
+    participant_file_names: list[str]
     participant_ids: list[str]
     components: list[list[str]]
 ```
@@ -366,7 +370,7 @@ def write_generate_grammar_output(
 
 `list_strategy_state_files()` 默认返回排序后的文件名，保证日志和验证顺序稳定。每个文件独立处理，排序不改变输出内容。
 
-`load_strategy_state_data()` 必须把旧 `fileNames` 去掉 `.pkl` 后作为 `participant_ids`。
+`load_strategy_state_data()` 必须同时保留旧 `fileNames` 原始值作为 `participant_file_names`，并把去掉 `.pkl` 后的值作为 `participant_ids`。
 
 ### `state_graph.py`
 
@@ -577,6 +581,7 @@ legacy = {
 structured = {
     "source": {
         "input_file_name": "...",
+        "participant_file_names": [...],
         "participant_ids": [...],
     },
     "parameters": {

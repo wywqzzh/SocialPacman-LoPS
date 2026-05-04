@@ -54,7 +54,23 @@ Plans:
   12. 参与重构的调用模块已完成模块级行为测试，并在相同数据和相同随机参数下与原始模块结果一致。
   13. `src/LoPS/temp` 中的临时验证代码已清理。
   14. 完成记录说明运行方式、验证方式和一致性结论。
-**Plans**: TBD（分析报告 → 多轮讨论 → 重构计划审核 → 执行实现 → 一致性验证）
+**Plans**: 5 plans
+
+Plans:
+**Wave 1**
+- [ ] 02-01: 建立 generate_grammar 基础模块和数据入口。
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 02-02: 重实现 scoring 模块并对比原始模块行为。
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 02-03: 实现 token 化 grammar 学习核心。
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 02-04: 实现 legacy/structured 输出、pipeline 和运行脚本。
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 02-05: 建立验证脚本、数据来源记录和完成验证报告。
 
 ## 重构 Phase 模式
 
@@ -96,4 +112,4 @@ Phases execute in numeric order: 1 -> 2 -> ...
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. 项目骨架与任务接收契约 | 2/2 | Complete    | 2026-05-03 |
-| 2. 重构 generateGrammar 模块 | 0/TBD | Not started | - |
+| 2. 重构 generateGrammar 模块 | 0/5 | Ready to execute | - |

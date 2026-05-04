@@ -33,6 +33,13 @@
 - [ ] **MOD-03**: 新模块不得依赖未记录的当前工作目录、隐藏全局状态或外部数据路径。
 - [ ] **MOD-04**: 系统可以保留原始算法语义，同时改进结构、命名和可读性。
 
+### 架构质量
+
+- [ ] **ARCH-01**: 重构不是简单搬运代码，必须基于原始行为重新设计模块结构、接口和实现。
+- [ ] **ARCH-02**: 新设计必须追求高内聚低耦合，清晰区分核心计算、数据读取、参数配置、运行入口和验证逻辑。
+- [ ] **ARCH-03**: 重构方案必须恪守 KISS 原则，优先选择最直接、最清晰、最易维护的实现。
+- [ ] **ARCH-04**: 系统必须避免过度工程化、过早抽象和不必要的防御性设计；任何新增抽象都必须有明确收益。
+
 ### 数据与运行脚本
 
 - [ ] **DATA-01**: 系统可以把确认需要纳入项目的数据整理到 `data` 下的合适位置。
@@ -94,6 +101,10 @@
 | MOD-02 | Phase 2 | Pending |
 | MOD-03 | Phase 2 | Pending |
 | MOD-04 | Phase 2 | Pending |
+| ARCH-01 | Phase 2 | Pending |
+| ARCH-02 | Phase 2 | Pending |
+| ARCH-03 | Phase 2 | Pending |
+| ARCH-04 | Phase 2 | Pending |
 | DATA-01 | Phase 2 | Pending |
 | DATA-02 | Phase 2 | Pending |
 | DATA-03 | Phase 2 | Pending |
@@ -108,10 +119,10 @@
 | VERF-08 | Phase 2 | Pending |
 
 **Coverage:**
-- v1 requirements: 28 total
-- Mapped to phases: 28
+- v1 requirements: 32 total
+- Mapped to phases: 32
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-05-03*
-*Last updated: 2026-05-04 after changing each refactor to one phase*
+*Last updated: 2026-05-04 after adding architecture-quality requirements*

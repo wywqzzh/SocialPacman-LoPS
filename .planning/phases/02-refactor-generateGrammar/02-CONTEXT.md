@@ -33,10 +33,11 @@
 - **D-03:** 模块结构为 `src/LoPS/grammar_chunking/`，包含 `__init__.py`、`data_loader.py`、`chunking.py`、`tools.py`
 
 ### 随机种子处理
-- **D-04:** 在新模块入口统一设置随机种子：`random.seed(seed)` 和 `np.random.seed(seed)`
-- **D-05:** 验证阶段在 `src/LoPS/temp/` 中创建带种子注入的 bayesianScore.py 副本
-- **D-06:** 验证时使用固定种子（如 42），确保新旧实现使用相同种子
-- **D-07:** 验证通过后删除 `src/LoPS/temp/` 中的临时代码
+- **D-04:** 当前执行路径 `main("ghost2", 0.5, False)` 中**无随机源被触发**（已通过代码追踪确认）
+- **D-05:** `needShuffle=False` 时 generateGrammar.py 不调用 `random.shuffle()`
+- **D-06:** bayesianScore.py 中的 `data_balance()` 随机调用已被注释掉，不在调用链中
+- **D-07:** 新模块接口仍保留可选的 `random_seed` 参数，以支持未来可能的随机场景
+- **D-08:** 验证阶段**不需要**在 `src/LoPS/temp/` 中创建带种子注入的副本（原始代码已是确定性的）
 
 ### 数据路径处理
 - **D-08:** 新模块接口接收绝对路径参数（input_dir, state_dir, output_dir）
@@ -49,10 +50,11 @@
 - **D-13:** 随机种子参数可选，默认 None（保持原始行为），验证时传入固定值
 
 ### 验证策略
-- **D-14:** 先尝试完全一致比较（pickle 字节级比较）
-- **D-15:** 如果完全一致失败，逐字段比较，对浮点数组使用 `np.allclose(rtol=1e-9, atol=1e-12)`
-- **D-16:** 先验证 1 个文件（快速反馈），通过后验证全部 34 个文件
-- **D-17:** 记录每个文件的验证结果和任何使用的数值容差
+- **D-09:** 由于原始代码是确定性的（无随机源），验证应该**完全一致**（pickle 字节级比较）
+- **D-10:** 如果字节级比较失败，逐字段比较，对浮点数组使用 `np.allclose(rtol=1e-9, atol=1e-12)`
+- **D-11:** 先验证 1 个文件（快速反馈），通过后验证全部 34 个文件
+- **D-12:** 记录每个文件的验证结果和任何使用的数值容差
+- **D-13:** 不需要创建 `src/LoPS/temp/` 临时代码（原始代码已是确定性的）
 
 ### Claude's Discretion
 - 具体的类和函数命名（只要清晰表达意图）
@@ -108,10 +110,12 @@
 <specifics>
 ## Specific Ideas
 
-### 已识别的随机源
-1. **generateGrammar.py 第 623 行**：`random.shuffle(shuffleIndex)` - 当前调用 `needShuffle=False`，不会触发
-2. **bayesianScore.py 第 24-26 行**：`np.random.choice()` 和 `random.shuffle()` 在 `data_balance()` 函数中
-3. **需要追踪**：`data_balance()` 是否被 `learnBayesNetBlock` 调用
+### 已识别的随机源（已完成追踪）
+1. **generateGrammar.py 第 623 行**：`random.shuffle(shuffleIndex)` - 当前调用 `needShuffle=False`，**不会触发**
+2. **bayesianScore.py 第 24-26 行**：`np.random.choice()` 和 `random.shuffle()` 在 `data_balance()` 函数中 - **已被注释掉**，不在调用链中
+3. **调用链确认**：`learnBayesNetBlock` → `BDscore`，不调用 `data_balance()`
+4. **Utils.py 和 condindepEmp.py**：无随机调用
+5. **结论**：当前执行路径 `main("ghost2", 0.5, False)` **完全确定性**，无随机源被触发
 
 ### 核心算法
 - **Chunking 算法**：迭代式语法分块，使用 BDscore 评估组合合理性

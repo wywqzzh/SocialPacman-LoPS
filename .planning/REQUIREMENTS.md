@@ -45,8 +45,8 @@
 ### 数据与运行脚本
 
 - [ ] **DATA-01**: 系统可以把确认需要纳入项目的数据整理到 `data` 下的合适位置。
-- [ ] **DATA-02**: 系统可以在 `script` 下创建运行新模块的脚本。
-- [ ] **DATA-03**: 运行脚本可以使用整理后的数据执行新实现并生成可比较输出。
+- [x] **DATA-02**: 系统可以在 `script` 下创建运行新模块的脚本。
+- [x] **DATA-03**: 运行脚本可以使用整理后的数据执行新实现并生成可比较输出。
 - [ ] **DATA-04**: 数据迁移记录必须说明文件来源、用途和与原始脚本路径的关系。
 
 ### 一致性验证
@@ -112,8 +112,8 @@
 | ARCH-03 | Phase 2 | Complete |
 | ARCH-04 | Phase 2 | Complete |
 | DATA-01 | Phase 2 | Pending |
-| DATA-02 | Phase 2 | Pending |
-| DATA-03 | Phase 2 | Pending |
+| DATA-02 | Phase 2 | Complete |
+| DATA-03 | Phase 2 | Complete |
 | DATA-04 | Phase 2 | Pending |
 | VERF-01 | Phase 2 | Pending |
 | VERF-02 | Phase 2 | Pending |

@@ -58,7 +58,7 @@ Plans:
 
 Plans:
 **Wave 1**
-- [ ] 02-01: 建立 generate_grammar 基础模块和数据入口。
+- [x] 02-01: 建立 generate_grammar 基础模块和数据入口。
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 02-02: 重实现 scoring 模块并对比原始模块行为。

@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: ready_to_plan
-stopped_at: Phase 1 已完成
-last_updated: "2026-05-03T15:34:03.000Z"
+status: 准备规划
+stopped_at: Phase 2 context gathered
+last_updated: "2026-05-04T09:37:48.225Z"
 last_activity: 2026-05-03
 progress:
-  total_phases: 5
+  total_phases: 2
   completed_phases: 1
-  total_plans: 13
+  total_plans: 2
   completed_plans: 2
-  percent: 20
+  percent: 100
 ---
 
 # 项目状态
@@ -80,6 +80,6 @@ Progress: [██--------] 20%
 
 ## Session Continuity（会话连续性）
 
-Last session: 2026-05-03T15:34:03.000Z
-Stopped at: Phase 1 已完成
-Resume file: None
+Last session: 2026-05-04T09:37:48.214Z
+Stopped at: Phase 2 context gathered
+Resume file: .planning/phases/02-refactor-generateGrammar/02-CONTEXT.md

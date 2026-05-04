@@ -51,11 +51,18 @@ python /home/zzh/project/Pacman/2.Pac-man/structre-learning/scripts/fmriDataProc
 
 ## 后续阶段记录
 
-- 分析文档: 待生成。
+- 分析文档: `.planning/phases/02-refactor-generateGrammar/02-ANALYSIS.md`
 - discuss 问题清单: 待生成。
 - 重构方案: 待确认。
 - 实施计划: 待确认。
 - 验证结论: 待验证。
+
+## 分析运行记录
+
+- 已在 LoPS 当前仓库内构建 sandbox 运行原脚本，未写入原项目目录。
+- 单文件 `031222-401.pkl` smoke run 成功，sandbox 输出与原项目既有 `grammar2/031222-401.pkl` 字节级一致。
+- 全量 34 个文件运行成功，sandbox 输出与原项目既有 `grammar2/` 34 个文件全部 MD5 一致。
+- 默认运行未触发随机过程；`needShuffle=True` 分支不在本轮范围内。
 
 ## 安全提醒
 

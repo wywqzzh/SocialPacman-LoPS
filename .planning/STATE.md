@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: 准备规划
-stopped_at: Phase 2 intake 已重建
-last_updated: "2026-05-04T10:29:52.000Z"
+stopped_at: Phase 2 深度分析已完成，准备进入 discuss
+last_updated: "2026-05-04T10:44:38.000Z"
 last_activity: 2026-05-04
 progress:
   total_phases: 2
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-05-03)
 
 Phase: 2
 Plan: 尚未开始
-Status: 准备规划
+Status: 准备进入 discuss
 Last activity: 2026-05-04
 
 Progress: [█████-----] 50%
@@ -64,6 +64,8 @@ Progress: [█████-----] 50%
 - 初始化阶段决定：一致性验证默认要求同输入同 seed 下输出完全一致。
 - Phase 2 决定：本轮只关注 `main("ghost2", 0.5, False)` 默认运行实际使用到的分支，未使用分支不参与重构。
 - Phase 2 决定：原始脚本和原始脚本所在目录只读，所有写入只能发生在当前 LoPS 仓库内。
+- Phase 2 分析结论：默认运行实际依赖 `generateGrammar.py`、`src.bayesianScore.BDscore`、`src.bayesianScore.learnBayesNetBlock` 和 `src.Utils.count`。
+- Phase 2 分析结论：sandbox 全量 34 个输出与原项目既有 `grammar2/` 输出全部 MD5 一致。
 
 ### Pending Todos（待办）
 
@@ -71,8 +73,8 @@ Progress: [█████-----] 50%
 
 ### Blockers/Concerns（阻塞与关注点）
 
-- Phase 2 intake 已重建，见 `.planning/runs/2026-05-04-generateGrammar/intake.md`。
-- 进入重构方案前，必须先产出 generateGrammar.py 的深度分析报告。
+- Phase 2 深度分析报告已生成，见 `.planning/phases/02-refactor-generateGrammar/02-ANALYSIS.md`。
+- 进入 plan 前，需要围绕分析报告中的 discuss 问题确认范围、输出兼容性和依赖模块迁移边界。
 
 ## Deferred Items（延后事项）
 
@@ -83,6 +85,6 @@ Progress: [█████-----] 50%
 
 ## Session Continuity（会话连续性）
 
-Last session: 2026-05-04T10:29:52.000Z
-Stopped at: Phase 2 intake 已重建
-Resume file: .planning/runs/2026-05-04-generateGrammar/intake.md
+Last session: 2026-05-04T10:44:38.000Z
+Stopped at: Phase 2 深度分析已完成，准备进入 discuss
+Resume file: .planning/phases/02-refactor-generateGrammar/02-ANALYSIS.md

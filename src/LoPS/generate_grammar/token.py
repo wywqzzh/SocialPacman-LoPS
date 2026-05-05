@@ -6,6 +6,55 @@ from collections.abc import Sequence
 
 
 TOKEN_SEPARATOR = "-"
+GrammarToken = tuple[str, ...]
+
+
+def parse_token_string(token: str) -> GrammarToken:
+    """把边界输入的 token 字符串转换为核心 tuple token。
+
+    输入语义：token 是外部展示或 pickle 输出中使用的字符串，例如 "G" 或 "G-L"。
+    输出语义：返回不可变的基础动作 tuple，例如 ("G",) 或 ("G", "L")。
+    关键约束：核心算法后续应依赖 tuple 的长度和成员关系表达 token 语义，而不是依赖字符串字符位置。
+    """
+
+    # 字符串解析只发生在边界处；解析后用 tuple 保存，避免核心逻辑反复 split。
+    return tuple(split_token(token))
+
+
+def format_grammar_token(token: GrammarToken) -> str:
+    """把核心 tuple token 格式化为外部字符串表示。
+
+    输入语义：token 是核心算法内部使用的基础动作 tuple。
+    输出语义：返回使用 TOKEN_SEPARATOR 连接的字符串，供输出、日志和验证适配器使用。
+    关键约束：格式化只负责展示，不应反向决定核心算法如何判断 token 组成。
+    """
+
+    # 对外仍保持 "G-L" 格式，保证已有输出和人工阅读方式稳定。
+    return format_token(token)
+
+
+def combine_grammar_tokens(parent: GrammarToken, child: GrammarToken) -> GrammarToken:
+    """按顺序组合两个核心 tuple token。
+
+    输入语义：parent 和 child 是已经解析好的核心 token。
+    输出语义：返回两者基础动作顺序拼接后的 tuple token。
+    关键约束：本函数不做重叠校验；是否允许组合由候选筛选规则决定。
+    """
+
+    # tuple 拼接直接表达基础动作序列组合，不需要通过字符串中转。
+    return parent + child
+
+
+def grammar_tokens_share_base(left: GrammarToken, right: GrammarToken) -> bool:
+    """判断两个核心 tuple token 是否共享基础动作。
+
+    输入语义：left 和 right 是核心算法内部使用的 token tuple。
+    输出语义：任一基础动作重叠时返回 True，否则返回 False。
+    关键约束：判断基于 tuple 成员集合，不依赖外部字符串分隔符。
+    """
+
+    # 使用集合交集表达基础动作重叠；重复动作不会改变共享关系判断。
+    return bool(set(left) & set(right))
 
 
 def split_token(token: str) -> list[str]:

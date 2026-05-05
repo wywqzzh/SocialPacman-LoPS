@@ -1,8 +1,10 @@
 ---
 quick_id: 260504-wnj
 slug: pyproject-toml-poetry-lock-python
-status: in_progress
+status: complete
 created: 2026-05-04
+completed: 2026-05-05
+resolution: superseded
 ---
 
 # Quick Task 260504-wnj: 修正 pyproject.toml 和 poetry.lock 模板内容
@@ -29,3 +31,7 @@ created: 2026-05-04
    - `poetry check` 通过。
    - `poetry lock` 能基于当前配置生成锁文件。
    - `pyproject.toml` 和 `poetry.lock` 中不再包含 `bayesianbrain`。
+
+## 关闭说明
+
+该 quick 任务在执行过程中被后续依赖识别任务替代，用户明确说明“上面任务已经完成不需要继续”。本记录按已关闭处理，不再作为 v1 里程碑的开放工作项。

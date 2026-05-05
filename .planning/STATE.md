@@ -4,7 +4,7 @@ milestone: v1.0
 milestone_name: milestone
 status: completed
 stopped_at: Completed 03-06-PLAN.md
-last_updated: "2026-05-05T04:48:48.180Z"
+last_updated: "2026-05-05T05:51:16.025Z"
 last_activity: 2026-05-05
 progress:
   total_phases: 3
@@ -21,7 +21,7 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-03)
 
 **核心价值:** 每次重构都必须在不改变科研计算结果的前提下，把外部脚本重新设计并实现为边界清晰、可运行、可验证的 LoPS 模块。  
-**当前重点:** Phase 3 已完成 — generateGrammar 顶层算法审计与优化已通过过程测试、历史测试和 34 文件全量验证。
+**当前重点:** v1.0 已完成并通过里程碑审计，下一步是归档当前里程碑并准备后续重构任务。
 
 ## Current Position（当前位置）
 
@@ -36,7 +36,7 @@ Progress: [██████████] 100%
 
 **速度:**
 
-- 已完成计划总数: 7
+- 已完成计划总数: 13
 - 平均耗时: n/a
 - 总执行时间: 0 hours
 
@@ -45,10 +45,12 @@ Progress: [██████████] 100%
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 2 | - | - |
+| 2 | 5 | - | - |
+| 3 | 6 | - | - |
 
 **近期趋势:**
 
-- 最近 5 个计划: 02-01, 02-02, 02-03, 02-04, 02-05
+- 最近 5 个计划: 03-02, 03-03, 03-04, 03-05, 03-06
 - 趋势: n/a
 
 *每个计划完成后更新*
@@ -80,7 +82,7 @@ Progress: [██████████] 100%
 
 ### Pending Todos（待办）
 
-- Phase 3 已完成。如继续当前里程碑，可运行 `$gsd-complete-milestone`；如新增重构任务，应先新增或讨论下一个 phase。
+- v1.0 已通过里程碑审计，待归档和打 tag。归档后如新增重构任务，应先新增或讨论下一个 phase。
 
 ### Blockers/Concerns（阻塞与关注点）
 
@@ -97,9 +99,10 @@ Progress: [██████████] 100%
 
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
-| 260505-cij | 将当前脚本测试和运行使用的输入输出数据从 `.planning` 迁移到 `data/generate_grammar` 下 | 2026-05-05 | uncommitted | [.planning/quick/260505-cij-planning-data-generate-grammar](./quick/260505-cij-planning-data-generate-grammar/) |
-| 260505-cs4 | 移除 `src` 中旧项目数据目录依赖并将 `generateGrammar` 输入基准数据迁移到 `data` | 2026-05-05 | uncommitted | [.planning/quick/260505-cs4-src-generategrammar-data](./quick/260505-cs4-src-generategrammar-data/) |
-| 260505-dek | 隔离 `generateGrammar` 旧格式兼容并通过统一转换接口验证新旧一致性 | 2026-05-05 | uncommitted | [.planning/quick/260505-dek-generategrammar](./quick/260505-dek-generategrammar/) |
+| 260504-wnj | 修正 pyproject/poetry 模板任务被后续依赖整理任务替代并关闭 | 2026-05-05 | historical | [.planning/quick/260504-wnj-pyproject-toml-poetry-lock-python](./quick/260504-wnj-pyproject-toml-poetry-lock-python/) |
+| 260505-cij | 将当前脚本测试和运行使用的输入输出数据从 `.planning` 迁移到 `data/generate_grammar` 下 | 2026-05-05 | historical | [.planning/quick/260505-cij-planning-data-generate-grammar](./quick/260505-cij-planning-data-generate-grammar/) |
+| 260505-cs4 | 移除 `src` 中旧项目数据目录依赖并将 `generateGrammar` 输入基准数据迁移到 `data` | 2026-05-05 | historical | [.planning/quick/260505-cs4-src-generategrammar-data](./quick/260505-cs4-src-generategrammar-data/) |
+| 260505-dek | 隔离 `generateGrammar` 旧格式兼容并通过统一转换接口验证新旧一致性 | 2026-05-05 | historical | [.planning/quick/260505-dek-generategrammar](./quick/260505-dek-generategrammar/) |
 
 ## Session Continuity（会话连续性）
 

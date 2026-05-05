@@ -15,7 +15,25 @@ import pandas as pd
 from LoPS.generate_grammar.config import GrammarLearningParams
 from LoPS.generate_grammar.scoring import bd_score, learn_state_condition_links
 from LoPS.generate_grammar.state_graph import StateDependencyGraph
-from LoPS.generate_grammar.token import combine_tokens, split_token, token_length, tokens_share_base_token
+from LoPS.generate_grammar.token import GrammarToken, combine_tokens, split_token, token_length, tokens_share_base_token
+
+
+@dataclass
+class ParsedSequence:
+    """保存一次最长匹配解析得到的全部派生信息。
+
+    输入语义：由基础 token 序列和当前 grammar token 集合解析得到。
+    输出语义：tokens 保存核心 tuple token，token_strings 保存对应输出字符串，计数、概率、
+    时间占比和 position_grammar 保存后续学习或验证需要的派生指标。
+    关键约束：该结构只描述解析结果，不保存候选筛选、pair posterior 或 BD score 结果。
+    """
+
+    tokens: list[GrammarToken]
+    token_strings: list[str]
+    token_counts: dict[str, int]
+    token_probabilities: dict[str, float]
+    token_time: dict[str, float]
+    position_grammar: list[str]
 
 
 @dataclass

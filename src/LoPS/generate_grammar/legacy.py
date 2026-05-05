@@ -7,6 +7,7 @@ from LoPS.generate_grammar.token import token_length
 
 
 LEGACY_FIELD_ORDER = (
+    # 字段顺序按旧 pickle 常用顺序固定，便于人工检查和逐 key/value 验证。
     "sets",
     "pro",
     "gram",
@@ -24,6 +25,7 @@ LEGACY_FIELD_ORDER = (
 
 
 def _legacy_places() -> list[str]:
+    # 旧代码从 ASCII 32..125 中取占位符，并移除基础策略字符；这里必须完全复刻顺序。
     place_set = [chr(i) for i in range(32, 126)]
     for token in ("e", "G", "L", "E", "A", "1", "2", "3", "4", "S", "V", "N"):
         place_set.remove(token)
@@ -31,10 +33,13 @@ def _legacy_places() -> list[str]:
 
 
 def _legacy_token(token: str) -> str:
+    # legacy 输出中的 sets/components 使用旧格式，不带新核心 token 的 "-" 分隔符。
     return token.replace("-", "")
 
 
 def _legacy_symbol_by_token(tokens: list[str]) -> dict[str, str]:
+    # 基础 token 沿用自身符号，复合 token 才按旧 place_set 分配临时占位符。
+    # 该映射只在 legacy 输出层存在，不能回流到核心学习算法。
     places = _legacy_places()
     symbol_by_token = {}
     place_index = 0
@@ -48,14 +53,17 @@ def _legacy_symbol_by_token(tokens: list[str]) -> dict[str, str]:
 
 
 def build_legacy_output(result: GrammarLearningResult, skip_gram: SkipGramResult) -> dict[str, Any]:
+    # 将新核心结果转换为旧 pickle 结构，用于和 grammar 基准做逐 key/value 精确比较。
     symbol_by_token = _legacy_symbol_by_token(result.grammar_tokens)
     legacy_sets = [_legacy_token(token) for token in result.grammar_tokens]
     legacy_s = [symbol_by_token[token] for token in result.grammar_tokens]
+    # seq 是旧占位符序列；parsed_sequence 中的复合 token 在这里才被替换成旧占位符。
     legacy_seq = "".join(symbol_by_token[token] for token in result.parsed_sequence)
     legacy_components = [
         [_legacy_token(component[0]), _legacy_token(component[1])]
         for component in result.components
     ]
+    # 普通 dict 在当前 Python 版本保持插入顺序，因此按 LEGACY_FIELD_ORDER 手动写入。
     legacy_output = {}
     legacy_output["sets"] = legacy_sets
     legacy_output["pro"] = result.probabilities

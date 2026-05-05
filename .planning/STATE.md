@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: milestone
 status: complete
 stopped_at: Completed Phase 2
-last_updated: "2026-05-04T12:57:28.000Z"
-last_activity: 2026-05-04
+last_updated: "2026-05-05T09:22:29+08:00"
+last_activity: 2026-05-05
 progress:
   total_phases: 2
   completed_phases: 2
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-05-03)
 Phase: 2
 Plan: 全部完成
 Status: Complete
-Last activity: 2026-05-04
+Last activity: 2026-05-05
 
 Progress: [██████████] 100%
 
@@ -70,6 +70,8 @@ Progress: [██████████] 100%
 - Phase 2 执行结论：`GrammarLearner` 已使用 `"G-L"` 形式 token 重实现核心 chunk 学习和 skip-gram 检测，不生成旧占位符。
 - Phase 2 执行结论：pipeline 已输出顶层 `legacy` 和 `structured` 两个字典，并通过运行脚本 smoke test 生成 34 个文件。
 - Phase 2 验证结论：34/34 新输出的 `legacy` 与旧 `grammar2/` 基准逐 key/value 精确一致，`src/LoPS/temp` 无残留。
+- Quick 260505-cij 决定：当前脚本和测试使用的 LoPS 内部数据必须放在 `data/generate_grammar`，`.planning` 只保存计划、讨论、分析和结论文档。
+- Quick 260505-cs4 决定：`src/LoPS` 不得保存旧项目或其它项目的数据目录、代码目录等绝对路径；`generateGrammar` 输入、状态图和旧基准数据已迁移到 `data/generate_grammar`，运行脚本可为这些固定目录设置默认参数。
 
 ### Pending Todos（待办）
 
@@ -87,8 +89,15 @@ Progress: [██████████] 100%
 | 自动化辅助 | 验证脚本模板、环境快照、差异诊断 | v2 | 初始化 |
 | 批量管理 | 外部项目扫描和多任务管理 | v2 | 初始化 |
 
+## Quick Tasks Completed（已完成快速任务）
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 260505-cij | 将当前脚本测试和运行使用的输入输出数据从 `.planning` 迁移到 `data/generate_grammar` 下 | 2026-05-05 | uncommitted | [.planning/quick/260505-cij-planning-data-generate-grammar](./quick/260505-cij-planning-data-generate-grammar/) |
+| 260505-cs4 | 移除 `src` 中旧项目数据目录依赖并将 `generateGrammar` 输入基准数据迁移到 `data` | 2026-05-05 | uncommitted | [.planning/quick/260505-cs4-src-generategrammar-data](./quick/260505-cs4-src-generategrammar-data/) |
+
 ## Session Continuity（会话连续性）
 
-Last session: 2026-05-04T12:57:28.000Z
-Stopped at: Completed Phase 2
+Last session: 2026-05-05T09:22:29+08:00
+Stopped at: Completed quick task 260505-cs4
 Resume file: None

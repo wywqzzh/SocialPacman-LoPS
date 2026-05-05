@@ -41,7 +41,7 @@ PYTHONPATH=src conda run -n fmri python script/validate_generate_grammar.py
 新输出目录：
 
 ```text
-.planning/runs/2026-05-04-generateGrammar/refactored-output/grammar2/
+data/generate_grammar/refactored-output/grammar2/
 ```
 
 ## 模块级行为测试结论

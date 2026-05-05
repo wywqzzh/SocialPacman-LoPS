@@ -650,7 +650,7 @@ PYTHONPATH=src conda run -n fmri python script/run_generate_grammar.py
 默认写入 LoPS 仓库内：
 
 ```text
-.planning/runs/2026-05-04-generateGrammar/refactored-output/grammar2/
+data/generate_grammar/refactored-output/grammar2/
 ```
 
 运行脚本必须允许通过命令行参数覆盖输入目录、状态图目录、输出目录和关键学习参数。

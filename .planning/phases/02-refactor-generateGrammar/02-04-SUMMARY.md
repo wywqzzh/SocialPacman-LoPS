@@ -79,14 +79,14 @@ Each task was committed atomically:
 
 ```bash
 PYTHONPATH=src conda run -n fmri python -m unittest tests.test_generate_grammar_pipeline
-PYTHONPATH=src conda run -n fmri python script/run_generate_grammar.py --max-iterations 1 --output-dir .planning/runs/2026-05-04-generateGrammar/smoke-output
+PYTHONPATH=src conda run -n fmri python script/run_generate_grammar.py --max-iterations 1 --output-dir data/generate_grammar/smoke-output
 PYTHONPATH=src conda run -n fmri python -m unittest tests.test_generate_grammar_foundation tests.test_generate_grammar_scoring tests.test_generate_grammar_grammar tests.test_generate_grammar_pipeline
 ```
 
 结果：
 
 ```text
-Generated 34 files in .planning/runs/2026-05-04-generateGrammar/smoke-output
+Generated 34 files in data/generate_grammar/smoke-output
 Ran 14 tests in 1.194s
 OK
 ```

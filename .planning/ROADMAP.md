@@ -97,7 +97,7 @@ Plans:
 - [x] 03-02: 合并解析与概率统计。
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 03-03: 数组化离散状态数据组织。
+- [x] 03-03: 数组化离散状态数据组织。
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 03-04: 重整 GrammarLearner.learn 主循环。

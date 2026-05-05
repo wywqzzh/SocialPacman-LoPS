@@ -1,10 +1,10 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-milestone_name: milestone
-status: completed
-stopped_at: Completed 03-06-PLAN.md
-last_updated: "2026-05-05T05:51:16.025Z"
+milestone_name: generateGrammar 重构
+status: milestone_complete
+stopped_at: Archived v1.0 generateGrammar 重构
+last_updated: "2026-05-05T05:53:03.107Z"
 last_activity: 2026-05-05
 progress:
   total_phases: 3
@@ -18,16 +18,16 @@ progress:
 
 ## Project Reference（项目索引）
 
-See: .planning/PROJECT.md (updated 2026-05-03)
+See: .planning/PROJECT.md (updated 2026-05-05)
 
 **核心价值:** 每次重构都必须在不改变科研计算结果的前提下，把外部脚本重新设计并实现为边界清晰、可运行、可验证的 LoPS 模块。  
-**当前重点:** v1.0 已完成并通过里程碑审计，下一步是归档当前里程碑并准备后续重构任务。
+**当前重点:** v1.0 已归档。下一步是等待用户提供下一项重构的目标脚本、运行环境、运行命令和数据来源。
 
 ## Current Position（当前位置）
 
-Phase: 3
-Plan: 03-06
-Status: Phase 03 Complete
+Phase: none
+Plan: none
+Status: v1.0 Milestone Complete
 Last activity: 2026-05-05
 
 Progress: [██████████] 100%
@@ -82,7 +82,7 @@ Progress: [██████████] 100%
 
 ### Pending Todos（待办）
 
-- v1.0 已通过里程碑审计，待归档和打 tag。归档后如新增重构任务，应先新增或讨论下一个 phase。
+- 等待下一项重构输入：目标脚本、运行环境、运行命令、数据来源和本轮保留/舍弃范围。
 
 ### Blockers/Concerns（阻塞与关注点）
 

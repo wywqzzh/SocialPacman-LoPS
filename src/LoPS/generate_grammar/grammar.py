@@ -15,7 +15,14 @@ import pandas as pd
 from LoPS.generate_grammar.config import GrammarLearningParams
 from LoPS.generate_grammar.scoring import bd_score, learn_state_condition_links
 from LoPS.generate_grammar.state_graph import StateDependencyGraph
-from LoPS.generate_grammar.token import GrammarToken, combine_tokens, split_token, token_length, tokens_share_base_token
+from LoPS.generate_grammar.token import (
+    GrammarToken,
+    combine_tokens,
+    format_grammar_token,
+    parse_token_string,
+    token_length,
+    tokens_share_base_token,
+)
 
 
 @dataclass
@@ -23,13 +30,15 @@ class ParsedSequence:
     """保存一次最长匹配解析得到的全部派生信息。
 
     输入语义：由基础 token 序列和当前 grammar token 集合解析得到。
-    输出语义：tokens 保存核心 tuple token，token_strings 保存对应输出字符串，计数、概率、
-    时间占比和 position_grammar 保存后续学习或验证需要的派生指标。
+    输出语义：tokens 保存核心 tuple token，token_strings 保存对应输出字符串，span_starts/span_lengths
+    记录每个解析片段覆盖的原始位置，计数、概率、时间占比和 position_grammar 保存后续学习或验证需要的派生指标。
     关键约束：该结构只描述解析结果，不保存候选筛选、pair posterior 或 BD score 结果。
     """
 
     tokens: list[GrammarToken]
     token_strings: list[str]
+    span_starts: list[int]
+    span_lengths: list[int]
     token_counts: dict[str, int]
     token_probabilities: dict[str, float]
     token_time: dict[str, float]
@@ -184,6 +193,110 @@ class GrammarLearner:
         # GrammarLearner 只持有算法参数，不持有路径，也不读写文件。
         self.params = params
 
+    def _build_parsed_sequence(
+        self,
+        token_sequence: Sequence[str],
+        grammar_tokens: Sequence[str],
+    ) -> ParsedSequence:
+        """一次性构建最长匹配解析及其概率派生信息。
+
+        输入语义：token_sequence 是基础 token 序列；grammar_tokens 是当前有效 grammar token 顺序。
+        输出语义：返回 ParsedSequence，包含 tuple token、字符串 token、原始跨度、频次、概率、时间占比
+        和 position_grammar。
+        关键约束：匹配规则必须与旧解析完全一致；同一位置多个候选命中时，只在长度更长时替换，
+        相同长度保持 grammar_tokens 中先出现的候选。
+        """
+
+        # 边界输入仍是字符串，进入核心解析后立即展开为基础动作 tuple，避免在匹配循环中反复 split。
+        token_sequence_list = list(token_sequence)
+        base_tokens: GrammarToken = tuple(
+            base_token
+            for token in token_sequence_list
+            for base_token in parse_token_string(token)
+        )
+        grammar_token_pairs = [
+            (grammar_token, parse_token_string(grammar_token))
+            for grammar_token in grammar_tokens
+        ]
+        last_grammar_length = len(grammar_token_pairs[-1][1])
+
+        parsed_tokens: list[GrammarToken] = []
+        token_strings: list[str] = []
+        span_starts: list[int] = []
+        span_lengths: list[int] = []
+        position_grammar: list[str] = []
+        pointer = 0
+
+        while pointer < len(base_tokens):
+            matched_index = 0
+            matched_length = 0
+            for index, (_, grammar_token) in enumerate(grammar_token_pairs):
+                length = len(grammar_token)
+                # 这里保留旧实现的稳定最长匹配语义：只有更长命中才替换，等长候选保持先出现者。
+                if base_tokens[pointer:pointer + length] == grammar_token and length > matched_length:
+                    matched_length = length
+                    matched_index = index
+            if matched_length == 0:
+                raise ValueError(f"No grammar token matches sequence position {pointer}: {token_sequence_list[pointer:]}")
+
+            _, matched_token = grammar_token_pairs[matched_index]
+            matched_string = format_grammar_token(matched_token)
+            parsed_tokens.append(matched_token)
+            token_strings.append(matched_string)
+            span_starts.append(pointer)
+            span_lengths.append(matched_length)
+            # position_grammar 必须保留旧 parse_pro 的固定填充规则：使用最后一个 grammar token 的长度。
+            position_grammar += [matched_string] * last_grammar_length
+            pointer += matched_length
+
+        token_counts = {grammar_token: 0 for grammar_token in grammar_tokens}
+        for token_string in token_strings:
+            token_counts[token_string] += 1
+
+        total_count = np.sum(list(token_counts.values()))
+        token_probabilities = {
+            token_string: count / total_count
+            for token_string, count in token_counts.items()
+        }
+
+        # token_time 表示基础 token 覆盖占比；它只由频次和 token 基础长度决定。
+        weighted_counts = {
+            token_string: token_counts[token_string] * len(token_tuple)
+            for token_string, token_tuple in grammar_token_pairs
+        }
+        total_weighted_count = np.sum(list(weighted_counts.values()))
+        token_time = {
+            token_string: weighted_counts[token_string] / total_weighted_count
+            for token_string in token_counts
+        }
+
+        return ParsedSequence(
+            tokens=parsed_tokens,
+            token_strings=token_strings,
+            span_starts=span_starts,
+            span_lengths=span_lengths,
+            token_counts=token_counts,
+            token_probabilities=token_probabilities,
+            token_time=token_time,
+            position_grammar=position_grammar,
+        )
+
+    def _align_state_features_to_parsed_sequence(
+        self,
+        parsed: ParsedSequence,
+        state_features: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """按解析片段起点把状态特征对齐到 ParsedSequence。
+
+        输入语义：parsed 保存每个 chunk 在原始基础 token 序列中的起点；state_features 与基础 token 序列按行对齐。
+        输出语义：返回与 parsed.token_strings 等长的状态表，每行取对应 chunk 起点的状态。
+        关键约束：保持旧 `_parse_longest()` 行为，状态不做聚合、不取 chunk 末尾行。
+        """
+
+        # 一个 chunk 覆盖多个基础 token 时，旧实现只取该片段首个基础 token 的状态行。
+        parsed_state_rows = [list(state_features.iloc[start]) for start in parsed.span_starts]
+        return pd.DataFrame(parsed_state_rows, columns=state_features.columns)
+
     def _parse_longest(
         self,
         tokens: list[str],
@@ -198,33 +311,12 @@ class GrammarLearner:
         关键约束：grammar_tokens 必须至少覆盖 tokens 的每个位置；多个候选命中时选择基础 token 数最长者。
         """
 
-        # 对原始基础 token 序列做最长匹配解析。grammar_tokens 的顺序必须保持学习追加顺序；
-        # 当多个 token 都能匹配当前位置时，选择基础 token 长度最长的那个。
-        parsed_tokens = []
-        parsed_state_rows = []
-        pointer = 0
-        while pointer < len(tokens):
-            matched_index = 0
-            matched_length = 0
-            for index, grammar_token in enumerate(grammar_tokens):
-                # token_length 计算基础 token 个数，不能使用字符串长度；"G-L" 的长度是 2。
-                length = token_length(grammar_token)
-                if tokens[pointer:pointer + length] == split_token(grammar_token) and length > matched_length:
-                    matched_length = length
-                    matched_index = index
-            if matched_length == 0:
-                raise ValueError(f"No grammar token matches sequence position {pointer}: {tokens[pointer:]}")
-
-            parsed_tokens.append(grammar_tokens[matched_index])
-            if state_features is not None:
-                # 一个 chunk 覆盖多个基础 token 时，状态行对齐到该片段的首个基础 token。
-                parsed_state_rows.append(list(state_features.iloc[pointer]))
-            pointer += matched_length
+        parsed = self._build_parsed_sequence(tokens, grammar_tokens)
 
         if state_features is None:
-            return parsed_tokens, None
-        parsed_state_features = pd.DataFrame(parsed_state_rows, columns=state_features.columns)
-        return parsed_tokens, parsed_state_features
+            return parsed.token_strings, None
+        parsed_state_features = self._align_state_features_to_parsed_sequence(parsed, state_features)
+        return parsed.token_strings, parsed_state_features
 
     def _parse_probabilities(
         self,
@@ -238,38 +330,10 @@ class GrammarLearner:
         关键约束：输出顺序保持 grammar_tokens 顺序；position_grammar 的展开长度遵循固定填充长度约束。
         """
 
-        # 用 grammar_tokens 对原始序列重新解析，并统计每个 grammar 的频数和概率。
-        cover_indices = []
-        pointer = 0
-        position_grammar = []
-        # position_grammar 使用最后一个 grammar token 的基础长度作为固定填充长度，以保持输出编码约束。
-        last_grammar_length = token_length(grammar_tokens[-1])
-
-        while pointer < len(tokens):
-            matched_index = 0
-            matched_length = 0
-            for index, grammar_token in enumerate(grammar_tokens):
-                length = token_length(grammar_token)
-                if tokens[pointer:pointer + length] == split_token(grammar_token) and length > matched_length:
-                    matched_length = length
-                    matched_index = index
-            if matched_length == 0:
-                raise ValueError(f"No grammar token matches sequence position {pointer}: {tokens[pointer:]}")
-
-            cover_indices.append(matched_index)
-            pointer += matched_length
-            position_grammar += [grammar_tokens[matched_index]] * last_grammar_length
-
-        # frequencies_by_token 必须按 grammar_tokens 顺序初始化，保证概率和频数输出顺序稳定。
-        frequencies_by_token = {}
-        for grammar_token in grammar_tokens:
-            frequencies_by_token.update({grammar_token: 0})
-        for index in cover_indices:
-            frequencies_by_token[grammar_tokens[index]] += 1
-
-        frequencies = np.array(list(frequencies_by_token.values()))
-        probabilities = frequencies / np.sum(frequencies)
-        return list(grammar_tokens), list(probabilities), position_grammar, list(frequencies)
+        parsed = self._build_parsed_sequence(tokens, grammar_tokens)
+        frequencies = [parsed.token_counts[token] for token in grammar_tokens]
+        probabilities = [parsed.token_probabilities[token] for token in grammar_tokens]
+        return list(grammar_tokens), probabilities, parsed.position_grammar, frequencies
 
     def _organize_discrete_data(
         self,
@@ -376,7 +440,12 @@ class GrammarLearner:
         probabilities = static_probability(parsed_sequence, active_tokens)
         components = [[token, ""] for token in active_tokens]
 
-        predict_tokens, predict_probabilities, _, _ = self._parse_probabilities(original_sequence, active_tokens)
+        parsed_prediction = self._build_parsed_sequence(original_sequence, active_tokens)
+        predict_tokens = list(active_tokens)
+        predict_probabilities = [
+            parsed_prediction.token_probabilities[token]
+            for token in active_tokens
+        ]
         previous_distribution = {
             token: predict_probabilities[index]
             for index, token in enumerate(predict_tokens)
@@ -485,22 +554,22 @@ class GrammarLearner:
                 break
 
             # 每次加入新 chunk 后，都从 original_sequence 重新做最长匹配，更新解析序列和对齐状态。
-            parsed_sequence, parsed_state_features_or_none = self._parse_longest(
+            parsed_result = self._build_parsed_sequence(
                 original_sequence,
                 active_tokens,
-                state_features,
             )
-            if parsed_state_features_or_none is None:
-                raise ValueError("state_features must be provided for grammar learning")
-            parsed_state_features = parsed_state_features_or_none
-            probabilities = static_probability(parsed_sequence, active_tokens)
+            parsed_sequence = parsed_result.token_strings
+            parsed_state_features = self._align_state_features_to_parsed_sequence(parsed_result, state_features)
+            probabilities = [
+                parsed_result.token_probabilities[token]
+                for token in active_tokens
+            ]
 
             # 使用解析概率分布的 KL 均值作为收敛条件；窗口和阈值由参数控制。
-            predict_tokens, predict_probabilities, _, _ = self._parse_probabilities(original_sequence, active_tokens)
             current_distribution = {
-                token: predict_probabilities[index]
-                for index, token in enumerate(predict_tokens)
-                if predict_probabilities[index] != 0
+                token: parsed_result.token_probabilities[token]
+                for token in active_tokens
+                if parsed_result.token_probabilities[token] != 0
             }
             kl_history.append(kl_divergence(current_distribution, previous_distribution))
             previous_distribution = dict(current_distribution)
@@ -511,10 +580,20 @@ class GrammarLearner:
                 break
 
         # 循环结束后，按最终 active_tokens 重新统计 sets/pro/gram/frequency。
-        grammar_tokens, probabilities, position_grammar, frequencies = self._parse_probabilities(
+        final_parsed = self._build_parsed_sequence(
             original_sequence,
             active_tokens,
         )
+        grammar_tokens = list(active_tokens)
+        probabilities = [
+            final_parsed.token_probabilities[token]
+            for token in active_tokens
+        ]
+        position_grammar = final_parsed.position_grammar
+        frequencies = [
+            final_parsed.token_counts[token]
+            for token in active_tokens
+        ]
         # 删除概率为 0 的 grammar，保证输出只包含最终解析中实际出现过的项。
         nonzero_indices = np.where(np.array(probabilities) != 0)[0]
         grammar_tokens = [grammar_tokens[index] for index in nonzero_indices]

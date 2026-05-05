@@ -45,20 +45,57 @@ class ParsedSequence:
     position_grammar: list[str]
 
 
-@dataclass
-class OrganizedGrammarData:
-    """保存离散化后的语法学习矩阵。
+@dataclass(frozen=True)
+class DiscreteLearningData:
+    """保存候选评分所需的离散父子变量、状态条件变量和状态依赖信息。
 
-    输入语义：由解析后的 token 序列、有效 grammar token 列表、状态特征表和状态依赖图整理得到。
-    输出语义：data_child/data_parent 使用 1 表示未出现、2 表示出现；data_condition 保存状态值 + 1；
-    condition_state 记录每个 child token 需要附加评估的状态条件列名。
-    关键约束：字段顺序必须与 active_tokens 和状态列顺序一致，供后续 BD score 计算按位置索引。
+    输入语义：由 ParsedSequence、active token 顺序、状态矩阵和状态依赖图整理得到。
+    输出语义：data_parent/data_child 的行按 token_names 排列、列按相邻解析片段排列；
+    data_condition 的行按 state_names 排列、列按 child 时刻排列；condition_state 保存每个 child token
+    需要附加的状态条件名称；learned_state_adjacency 保存状态条件学习得到的邻接矩阵。
+    关键约束：token 二值变量继续使用 1/2 编码，状态变量继续使用原状态值 + 1 编码。
     """
 
-    data_child: pd.DataFrame
-    data_parent: pd.DataFrame
-    data_condition: pd.DataFrame
+    data_parent: np.ndarray
+    data_child: np.ndarray
+    data_condition: np.ndarray
     condition_state: list[list[str]]
+    learned_state_adjacency: np.ndarray
+    token_names: list[str]
+    state_names: list[str]
+
+    def parent_values(self, token: str) -> np.ndarray:
+        """按 token 名称取 parent 二值变量行。
+
+        输入语义：token 必须存在于 token_names。
+        输出语义：返回该 token 作为前一时刻 parent 的 1/2 编码样本。
+        关键约束：返回的是数组视图，调用方只读使用，不应原地修改。
+        """
+
+        return self.data_parent[self.token_names.index(token)]
+
+    def child_values(self, token: str) -> np.ndarray:
+        """按 token 名称取 child 二值变量行。
+
+        输入语义：token 必须存在于 token_names。
+        输出语义：返回该 token 作为当前时刻 child 的 1/2 编码样本。
+        关键约束：行顺序由 token_names 明确约束，不再依赖 DataFrame 列名。
+        """
+
+        return self.data_child[self.token_names.index(token)]
+
+    def condition_values(self, state_names: Sequence[str]) -> np.ndarray:
+        """按状态名称取 condition 状态变量矩阵。
+
+        输入语义：state_names 是需要作为 BD score parent 条件的状态列名。
+        输出语义：返回形状为 条件状态数 x 样本数 的 1-based 状态矩阵。
+        关键约束：空状态列表返回 0 行数组，供调用方按无条件路径处理。
+        """
+
+        if len(state_names) == 0:
+            return np.empty((0, self.data_condition.shape[1]), dtype=int)
+        condition_indices = [self.state_names.index(name) for name in state_names]
+        return self.data_condition[condition_indices]
 
 
 @dataclass
@@ -337,55 +374,44 @@ class GrammarLearner:
 
     def _organize_discrete_data(
         self,
-        tokens: list[str],
+        parsed: ParsedSequence,
         active_tokens: list[str],
         state_features: pd.DataFrame,
         state_dependencies: StateDependencyGraph,
-    ) -> OrganizedGrammarData:
+    ) -> DiscreteLearningData:
         """把解析序列和状态特征整理为 BD score 使用的离散矩阵。
 
-        输入语义：tokens 是当前解析序列；active_tokens 是当前可用 grammar token；state_features 与
-        tokens 按行对齐；state_dependencies 描述状态之间允许学习的条件关系。
-        输出语义：返回 parent、child、condition 三类矩阵以及每个 child token 的状态条件列名。
-        关键约束：二值 token 变量使用 1/2 编码；状态变量使用原状态值 + 1 编码，以满足计数矩阵从 1 开始。
+        输入语义：parsed 是当前解析结果；active_tokens 是当前可用 grammar token；
+        state_features 与 parsed.token_strings 按行对齐；state_dependencies 描述状态之间允许学习的条件关系。
+        输出语义：返回 ndarray 形式的 parent、child、condition 矩阵以及状态依赖学习结果。
+        关键约束：二值 token 变量使用 1/2 编码；状态变量使用原状态值 + 1 编码；每次调用仍重新学习状态条件链接。
         """
 
-        # 把解析后的 token 序列转为离散 parent/child/condition 矩阵。
-        # 所有状态都使用 1/2 或 state+1 编码，因为 BDscore/count 假定状态从 1 开始。
-        state_features = state_features.reset_index(drop=True)
-        data_parent = {}
-        data_child = {}
-        for token in active_tokens:
-            data_parent.update({token: np.ones(len(tokens) - 1)})
-            data_child.update({token: np.ones(len(tokens) - 1)})
+        tokens = parsed.token_strings
+        transition_count = len(tokens) - 1
+        token_to_index = {token: index for index, token in enumerate(active_tokens)}
+        state_names = list(state_features.columns)
+        # DataFrame 只作为输入边界；核心矩阵构建使用 ndarray 和显式 state_names 顺序。
+        state_values = np.asarray(state_features.reset_index(drop=True).values, dtype=int)
 
-        data_condition = {}
-        data_policy_condition = {}
-        for state_name in state_features.columns:
-            data_condition.update({state_name: np.ones(len(tokens) - 1)})
-            data_policy_condition.update({state_name: np.ones(len(tokens) - 1)})
+        data_parent = np.ones((len(active_tokens), transition_count), dtype=int)
+        data_child = np.ones((len(active_tokens), transition_count), dtype=int)
+        data_condition = np.ones((len(state_names), transition_count), dtype=int)
+        data_policy_condition = np.ones((len(state_names), transition_count), dtype=int)
 
         for index in range(1, len(tokens)):
-            # parent 使用上一个时间点的 token，child 使用当前时间点的 token。
-            data_parent[tokens[index - 1]][index - 1] = 2
-            data_child[tokens[index]][index - 1] = 2
-            for state_name in state_features.columns:
-                # data_condition 对齐 child 时刻，data_policy_condition 对齐 parent 时刻。
-                data_condition[state_name][index - 1] = state_features[state_name].iloc[index] + 1
-                data_policy_condition[state_name][index - 1] = state_features[state_name].iloc[index - 1] + 1
-
-        data_parent_frame = pd.DataFrame(data_parent, dtype=int)
-        data_child_frame = pd.DataFrame(data_child, dtype=int)
-        data_condition_frame = pd.DataFrame(data_condition, dtype=int)
-        data_policy_condition_frame = pd.DataFrame(data_policy_condition, dtype=int)
+            # parent 使用上一个解析 token，child 使用当前解析 token；样本列对应相邻解析片段。
+            data_parent[token_to_index[tokens[index - 1]], index - 1] = 2
+            data_child[token_to_index[tokens[index]], index - 1] = 2
+            # condition 对齐 child 时刻，policy_condition 对齐 parent 时刻，保持旧 BDscore 输入语义。
+            data_condition[:, index - 1] = state_values[index] + 1
+            data_policy_condition[:, index - 1] = state_values[index - 1] + 1
 
         # learn_state_condition_links 的 data 前半部分是状态条件变量，后半部分是 grammar parent 变量。
-        data = pd.concat([data_policy_condition_frame, data_parent_frame], axis=1).values.T
-        data = np.array(data, dtype=int)
-        nstates = np.max(data, axis=1).T
-        nstates = np.array(nstates, dtype=int)
-        casual_num = data_policy_condition_frame.shape[1]
-        effect_num = data_parent_frame.shape[1]
+        data = np.vstack((data_policy_condition, data_parent)).astype(int)
+        nstates = np.max(data, axis=1).T.astype(int)
+        casual_num = len(state_names)
+        effect_num = len(active_tokens)
         block_message = {index: [index] for index in range(casual_num)}
 
         # 通过状态图学习每个 grammar token 需要附加哪些状态条件。
@@ -400,17 +426,19 @@ class GrammarLearner:
             conditions=state_dependencies.conditions_by_state,
         )
         condition_state = []
-        names = np.array(list(data_condition_frame.columns))
         for index in range(casual_num, casual_num + effect_num):
             # learned_adjacency[:, index] == 1 表示对应状态列被学习为该 grammar parent 的条件。
             condition_indices = np.where(learned_adjacency[:, index] == 1)[0]
-            condition_state.append(list(names[condition_indices]))
+            condition_state.append([state_names[condition_index] for condition_index in condition_indices])
 
-        return OrganizedGrammarData(
-            data_child=data_child_frame,
-            data_parent=data_parent_frame,
-            data_condition=data_condition_frame,
+        return DiscreteLearningData(
+            data_parent=data_parent,
+            data_child=data_child,
+            data_condition=data_condition,
             condition_state=condition_state,
+            learned_state_adjacency=learned_adjacency,
+            token_names=list(active_tokens),
+            state_names=state_names,
         )
 
     def learn(
@@ -435,15 +463,15 @@ class GrammarLearner:
         # 保证候选 chunk 的加入不会累积破坏基础输入顺序。
         original_sequence = list(token_sequence)
         active_tokens = list(initial_tokens)
-        parsed_sequence = list(original_sequence)
-        parsed_state_features = state_features.reset_index(drop=True).copy()
+        parsed_result = self._build_parsed_sequence(original_sequence, active_tokens)
+        parsed_sequence = parsed_result.token_strings
+        parsed_state_features = self._align_state_features_to_parsed_sequence(parsed_result, state_features)
         probabilities = static_probability(parsed_sequence, active_tokens)
         components = [[token, ""] for token in active_tokens]
 
-        parsed_prediction = self._build_parsed_sequence(original_sequence, active_tokens)
         predict_tokens = list(active_tokens)
         predict_probabilities = [
-            parsed_prediction.token_probabilities[token]
+            parsed_result.token_probabilities[token]
             for token in active_tokens
         ]
         previous_distribution = {
@@ -455,7 +483,7 @@ class GrammarLearner:
         for _ in range(self.params.max_iterations):
             # 每轮根据当前解析序列重新组织离散数据，再评估哪些 parent->child 组合值得合并。
             organized = self._organize_discrete_data(
-                parsed_sequence,
+                parsed_result,
                 active_tokens,
                 parsed_state_features,
                 state_dependencies,
@@ -469,12 +497,12 @@ class GrammarLearner:
                 if child_token in self.params.excluded_child_tokens:
                     continue
 
-                data_child = organized.data_child[child_token].values
+                data_child = organized.child_values(child_token)
                 nstates_child = int(np.max(data_child).T)
                 condition_names = organized.condition_state[child_index]
                 if len(condition_names) != 0:
                     # 如果状态图认为该 child 受状态条件影响，BDscore 要把这些状态作为 parent 条件。
-                    data_condition = organized.data_condition[condition_names].values.T
+                    data_condition = organized.condition_values(condition_names)
                     nstates_condition = np.array(np.max(data_condition, 1).T, dtype=int)
                 else:
                     data_condition = []
@@ -497,7 +525,7 @@ class GrammarLearner:
                     if self.params.reject_shared_base_tokens and tokens_share_base_token(parent_token, child_token):
                         continue
 
-                    data_parent = organized.data_parent[parent_token].values.reshape(1, -1)
+                    data_parent = organized.parent_values(parent_token).reshape(1, -1)
                     nstates_parent = int(np.max(data_parent).T)
                     if len(condition_names) != 0:
                         # 有状态条件时，候选 parent 和状态条件一起作为 BDscore 的 parent 集。

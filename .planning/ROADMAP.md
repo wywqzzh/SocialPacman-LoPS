@@ -100,7 +100,7 @@ Plans:
 - [x] 03-03: 数组化离散状态数据组织。
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 03-04: 重整 GrammarLearner.learn 主循环。
+- [x] 03-04: 重整 GrammarLearner.learn 主循环。
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 03-05: 重构 skip-gram 和输出适配边界。

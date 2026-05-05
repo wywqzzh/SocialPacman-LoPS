@@ -129,12 +129,13 @@ class TestGenerateGrammarProcess(unittest.TestCase):
         关键约束：parent 对齐前一解析 token，child 对齐当前解析 token，condition 对齐 child 时刻。
         """
 
-        parsed, parsed_state = self.learner._parse_longest(
+        parsed_tokens, parsed_state = self.learner._parse_longest(
             self.tokens,
             self.grammar_tokens,
             self.state_features,
         )
         self.assertIsNotNone(parsed_state)
+        parsed = self.learner._build_parsed_sequence(self.tokens, self.grammar_tokens)
 
         organized = self.learner._organize_discrete_data(
             parsed,
@@ -143,38 +144,50 @@ class TestGenerateGrammarProcess(unittest.TestCase):
             StateDependencyGraph([[], [], [], [], [], []]),
         )
 
-        self.assertEqual(
-            organized.data_parent.to_dict("list"),
-            {
-                "G-L": [2, 1],
-                "E-A": [1, 2],
-                "G": [1, 1],
-                "L": [1, 1],
-                "E": [1, 1],
-                "A": [1, 1],
-            },
+        self.assertEqual(parsed_tokens, ["G-L", "E-A", "G-L"])
+        self.assertEqual(organized.token_names, self.grammar_tokens)
+        self.assertEqual(organized.state_names, ["IS1", "IS2", "PG1", "PG2", "PE", "BN5"])
+        np.testing.assert_array_equal(
+            organized.data_parent,
+            np.array(
+                [
+                    [2, 1],
+                    [1, 2],
+                    [1, 1],
+                    [1, 1],
+                    [1, 1],
+                    [1, 1],
+                ],
+                dtype=int,
+            ),
         )
-        self.assertEqual(
-            organized.data_child.to_dict("list"),
-            {
-                "G-L": [1, 2],
-                "E-A": [2, 1],
-                "G": [1, 1],
-                "L": [1, 1],
-                "E": [1, 1],
-                "A": [1, 1],
-            },
+        np.testing.assert_array_equal(
+            organized.data_child,
+            np.array(
+                [
+                    [1, 2],
+                    [2, 1],
+                    [1, 1],
+                    [1, 1],
+                    [1, 1],
+                    [1, 1],
+                ],
+                dtype=int,
+            ),
         )
-        self.assertEqual(
-            organized.data_condition.to_dict("list"),
-            {
-                "IS1": [1, 1],
-                "IS2": [2, 2],
-                "PG1": [2, 1],
-                "PG2": [1, 2],
-                "PE": [2, 1],
-                "BN5": [1, 2],
-            },
+        np.testing.assert_array_equal(
+            organized.data_condition,
+            np.array(
+                [
+                    [1, 1],
+                    [2, 2],
+                    [2, 1],
+                    [1, 2],
+                    [2, 1],
+                    [1, 2],
+                ],
+                dtype=int,
+            ),
         )
         self.assertEqual(
             [[str(name) for name in names] for names in organized.condition_state],
@@ -187,6 +200,10 @@ class TestGenerateGrammarProcess(unittest.TestCase):
                 [],
             ],
         )
+        expected_adjacency = np.zeros((12, 12))
+        expected_adjacency[2:6, 6] = 1
+        expected_adjacency[2:6, 7] = 1
+        np.testing.assert_array_equal(organized.learned_state_adjacency, expected_adjacency)
 
     def test_pair_posterior_comes_from_bd_score_not_raw_count(self) -> None:
         """验证候选 pair_posterior 来自 BD score 后验而不是纯频次。
@@ -196,12 +213,13 @@ class TestGenerateGrammarProcess(unittest.TestCase):
         关键约束：posterior[1, 1] 为 2.0，明显不同于该 pair 的纯 raw count 1。
         """
 
-        parsed, parsed_state = self.learner._parse_longest(
+        _, parsed_state = self.learner._parse_longest(
             self.tokens,
             self.grammar_tokens,
             self.state_features,
         )
         self.assertIsNotNone(parsed_state)
+        parsed = self.learner._build_parsed_sequence(self.tokens, self.grammar_tokens)
         organized = self.learner._organize_discrete_data(
             parsed,
             self.grammar_tokens,
@@ -209,8 +227,8 @@ class TestGenerateGrammarProcess(unittest.TestCase):
             StateDependencyGraph([[], [], [], [], [], []]),
         )
 
-        data_child = organized.data_child["G-L"].values
-        data_parent = organized.data_parent["E-A"].values.reshape(1, -1)
+        data_child = organized.child_values("G-L")
+        data_parent = organized.parent_values("E-A").reshape(1, -1)
         _, pair_posterior = bd_score(data_child, data_parent, 2, 2, 1)
         raw_count = int(np.sum((data_child == 2) & (data_parent.reshape(-1) == 2)))
 

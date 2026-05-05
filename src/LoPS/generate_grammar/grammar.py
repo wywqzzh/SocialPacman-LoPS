@@ -98,6 +98,27 @@ class DiscreteLearningData:
         return self.data_condition[condition_indices]
 
 
+@dataclass(frozen=True)
+class CandidateScore:
+    """保存单个 parent-child 候选的评分过程结果。
+
+    输入语义：由当前解析结果、离散学习矩阵、child token 和 parent token 计算得到。
+    输出语义：记录候选 chunk、直接组成、无 parent 得分、有 parent 得分、pair posterior、
+    pair frequency 和用于候选选择的 ratio。
+    关键约束：这是单个候选行的过程快照，不做跨候选预筛选，也不改变候选遍历顺序。
+    """
+
+    parent_token: str
+    child_token: str
+    chunk: str
+    components: list[str]
+    score_without_parent: float
+    score_with_parent: float
+    pair_posterior: np.ndarray
+    pair_frequency: float
+    ratio: float
+
+
 @dataclass
 class GrammarLearningResult:
     """保存一次 grammar 学习的完整内存结果。
@@ -441,6 +462,98 @@ class GrammarLearner:
             state_names=state_names,
         )
 
+    def _score_candidate_pair(
+        self,
+        organized: DiscreteLearningData,
+        probabilities: Sequence[float],
+        parsed_length: int,
+        child_index: int,
+        parent_index: int,
+        child_token: str,
+        parent_token: str,
+        data_child: np.ndarray,
+        data_condition: np.ndarray | list,
+        nstates_child: int,
+        nstates_condition: np.ndarray | list,
+        score_without_parent: float,
+    ) -> CandidateScore | None:
+        """计算单个 parent-child 候选的 BD score 和过滤结果。
+
+        输入语义：organized 提供离散 parent 矩阵；probabilities 是当前 active token 概率；
+        child_index/parent_index 对应 active token 顺序；data_child 和状态条件得分上下文由 child 循环预先计算。
+        输出语义：候选满足现有 pair posterior 过滤规则时返回 CandidateScore，否则返回 None。
+        关键约束：函数内部保持旧评分顺序：先计算 score_with_parent，再计算 pair_posterior，
+        最后按 pair_frequency 与独立概率乘积、最小频率阈值过滤。
+        """
+
+        # 候选 parent 不能与 child 相同，也不能属于排除集；共享基础 token 的组合可按参数拒绝。
+        if parent_token == child_token or parent_token in self.params.excluded_parent_tokens:
+            return None
+        if self.params.reject_shared_base_tokens and tokens_share_base_token(parent_token, child_token):
+            return None
+
+        data_parent = organized.parent_values(parent_token).reshape(1, -1)
+        nstates_parent = int(np.max(data_parent).T)
+        if len(data_condition) != 0:
+            # 有状态条件时，候选 parent 和状态条件一起作为 BDscore 的 parent 集。
+            parent_and_condition_data = np.vstack((data_parent, data_condition))
+            parent_and_condition_data = np.array(parent_and_condition_data, dtype=int)
+            nstates_parent_and_condition = np.array(np.max(parent_and_condition_data, 1).T, dtype=int)
+        else:
+            parent_and_condition_data = np.array(data_parent, dtype=int)
+            nstates_parent_and_condition = nstates_parent
+
+        score_alpha = 1 if self.params.chunk_alpha < 0 else self.params.chunk_alpha
+        # score_with_parent 是加入候选 grammar parent 后的得分；二者比值作为候选 ratio。
+        score_with_parent, _ = bd_score(
+            data_child,
+            parent_and_condition_data,
+            nstates_child,
+            nstates_parent_and_condition,
+            score_alpha,
+        )
+        # pair_posterior 必须继续来自 BD score 后验，其中包含 Dirichlet 先验，不是纯 raw count。
+        _, pair_posterior = bd_score(data_child, data_parent, 2, 2, 1)
+        pair_frequency = pair_posterior[1, 1] / parsed_length
+        if (
+            pair_frequency < probabilities[child_index] * probabilities[parent_index]
+            or pair_frequency < self.params.min_pair_frequency
+        ):
+            return None
+
+        ratio = score_without_parent / score_with_parent
+        return CandidateScore(
+            parent_token=parent_token,
+            child_token=child_token,
+            chunk=combine_tokens(parent_token, child_token),
+            components=[parent_token, child_token],
+            score_without_parent=score_without_parent,
+            score_with_parent=score_with_parent,
+            pair_posterior=pair_posterior,
+            pair_frequency=pair_frequency,
+            ratio=ratio,
+        )
+
+    def _select_next_chunk(
+        self,
+        candidate_scores: Sequence[CandidateScore],
+    ) -> tuple[list[str], list[float], list[list[str]]]:
+        """按当前候选选择规则挑选本轮要加入的 chunk。
+
+        输入语义：candidate_scores 按主循环原始遍历顺序排列。
+        输出语义：返回被选中的 chunk 字符串、ratio 和直接组成列表。
+        关键约束：选择逻辑委托给既有 choose_candidate_chunks()，保留 ratio 降序、ratio > 1
+        和 candidate_ratio_keep 的所有旧语义。
+        """
+
+        # 这里不重新排序候选行；choose_candidate_chunks 负责按旧规则排序和筛选。
+        return choose_candidate_chunks(
+            ratios=[candidate.ratio for candidate in candidate_scores],
+            chunks=[candidate.chunk for candidate in candidate_scores],
+            components=[candidate.components for candidate in candidate_scores],
+            keep_ratio=self.params.candidate_ratio_keep,
+        )
+
     def learn(
         self,
         token_sequence: list[str],
@@ -488,9 +601,7 @@ class GrammarLearner:
                 parsed_state_features,
                 state_dependencies,
             )
-            ratios = []
-            chunks = []
-            candidate_components = []
+            candidate_scores = []
 
             for child_index, child_token in enumerate(active_tokens):
                 # 配置中的 excluded_child_tokens 不参与 chunk 合并目标，避免特殊标记进入 child 评估。
@@ -519,54 +630,29 @@ class GrammarLearner:
                 )
 
                 for parent_index, parent_token in enumerate(active_tokens):
-                    # 候选 parent 不能与 child 相同，也不能属于排除集；共享基础 token 的组合可按参数拒绝。
-                    if parent_token == child_token or parent_token in self.params.excluded_parent_tokens:
-                        continue
-                    if self.params.reject_shared_base_tokens and tokens_share_base_token(parent_token, child_token):
-                        continue
-
-                    data_parent = organized.parent_values(parent_token).reshape(1, -1)
-                    nstates_parent = int(np.max(data_parent).T)
-                    if len(condition_names) != 0:
-                        # 有状态条件时，候选 parent 和状态条件一起作为 BDscore 的 parent 集。
-                        parent_and_condition_data = np.vstack((data_parent, data_condition))
-                        parent_and_condition_data = np.array(parent_and_condition_data, dtype=int)
-                        nstates_parent_and_condition = np.array(np.max(parent_and_condition_data, 1).T, dtype=int)
-                    else:
-                        parent_and_condition_data = np.array(data_parent, dtype=int)
-                        nstates_parent_and_condition = nstates_parent
-
-                    # score_with_parent 是加入候选 grammar parent 后的得分；二者比值作为候选 ratio。
-                    score_with_parent, _ = bd_score(
-                        data_child,
-                        parent_and_condition_data,
-                        nstates_child,
-                        nstates_parent_and_condition,
-                        score_alpha,
+                    candidate_score = self._score_candidate_pair(
+                        organized=organized,
+                        probabilities=probabilities,
+                        parsed_length=len(parsed_sequence),
+                        child_index=child_index,
+                        parent_index=parent_index,
+                        child_token=child_token,
+                        parent_token=parent_token,
+                        data_child=data_child,
+                        data_condition=data_condition,
+                        nstates_child=nstates_child,
+                        nstates_condition=nstates_condition,
+                        score_without_parent=score_without_parent,
                     )
-                    _, pair_posterior = bd_score(data_child, data_parent, 2, 2, 1)
-                    pair_frequency = pair_posterior[1, 1] / len(parsed_sequence)
-                    # parent-child 同现频率必须同时高于独立概率乘积和最小频率阈值，过滤弱关联候选。
-                    if (
-                        pair_frequency < probabilities[child_index] * probabilities[parent_index]
-                        or pair_frequency < self.params.min_pair_frequency
-                    ):
+                    if candidate_score is None:
                         continue
+                    candidate_scores.append(candidate_score)
 
-                    ratios.append(score_without_parent / score_with_parent)
-                    chunks.append(combine_tokens(parent_token, child_token))
-                    candidate_components.append([parent_token, child_token])
-
-            if len(ratios) == 0:
+            if len(candidate_scores) == 0:
                 break
 
             # 一轮可能选出多个接近最佳 ratio 的 chunk；它们按候选筛选顺序追加到 active_tokens。
-            selected_chunks, _, selected_components = choose_candidate_chunks(
-                ratios,
-                chunks,
-                candidate_components,
-                self.params.candidate_ratio_keep,
-            )
+            selected_chunks, _, selected_components = self._select_next_chunk(candidate_scores)
             if len(selected_chunks) == 0:
                 break
 

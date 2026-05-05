@@ -2,12 +2,12 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: complete
-stopped_at: Completed Phase 2
-last_updated: "2026-05-05T10:17:34+08:00"
+status: Planned
+stopped_at: Phase 3 context gathered
+last_updated: "2026-05-05T02:53:33.465Z"
 last_activity: 2026-05-05
 progress:
-  total_phases: 2
+  total_phases: 3
   completed_phases: 2
   total_plans: 7
   completed_plans: 7
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-03)
 
 **核心价值:** 每次重构都必须在不改变科研计算结果的前提下，把外部脚本重新设计并实现为边界清晰、可运行、可验证的 LoPS 模块。  
-**当前重点:** Phase 2 已完成 — 重构 generateGrammar 模块
+**当前重点:** Phase 3 已加入 — generateGrammar 顶层算法审计与优化
 
 ## Current Position（当前位置）
 
-Phase: 2
-Plan: 全部完成
-Status: Complete
+Phase: 3
+Plan: 待规划
+Status: Planned
 Last activity: 2026-05-05
 
-Progress: [██████████] 100%
+Progress: [███████░░░] 67%
 
 ## Performance Metrics（执行指标）
 
@@ -75,15 +75,16 @@ Progress: [██████████] 100%
 - 全局重构规则：新版本正式代码必须完全独立于旧版本代码和旧版本数据；新设计默认不考虑旧输出格式兼容，旧格式转换只能放在验证脚本或独立适配模块中，不能污染核心模块架构。
 - Quick 260505-dek 决定：`generateGrammar` 正式核心包删除旧格式兼容输出；新旧一致性验证统一通过 `script/generate_grammar/legacy_adapter.py` 将新结构映射为旧格式后执行。
 - 全局注释规则：代码注释用于说明功能、解释过程和标明关键数据含义；每个函数和类必须使用中文 docstring 说明功能、输入输出语义和关键约束，重点逻辑处保留中文中间注释。
+- Phase 3 决定：算法优化从顶层流程和数据流开始，先确认整体学习算法设计，再决定底层函数保留、删除、合并、缓存、向量化或重写。
 
 ### Pending Todos（待办）
 
-- Phase 2 已完成。下一项重构需要用户提供新的目标脚本、运行环境、运行命令和数据来源。
+- 基于 `.planning/phases/03-optimize-generateGrammar/03-ALGORITHM-ANALYSIS.md` 进入 `$gsd-discuss-phase 3`，围绕 token 内部表示、状态矩阵表示、状态条件链接重算策略、性能目标和验证标准向用户讨论优化方向。
 
 ### Blockers/Concerns（阻塞与关注点）
 
-- Phase 2 深度分析报告、讨论上下文和重构设计均已完成。
-- 无当前阻塞。Phase 2 验证已通过。
+- Phase 2 深度分析报告、讨论上下文、重构设计和验证均已完成，可作为 Phase 3 的行为基准。
+- 当前关注点是避免局部底层优化先行；Phase 3 已产出顶层算法分析报告，下一步需要先 discuss 再形成优化设计。
 
 ## Deferred Items（延后事项）
 
@@ -102,6 +103,6 @@ Progress: [██████████] 100%
 
 ## Session Continuity（会话连续性）
 
-Last session: 2026-05-05T10:17:34+08:00
-Stopped at: Updated annotation rules and rewrote code comments
-Resume file: None
+Last session: 2026-05-05T02:53:33.456Z
+Stopped at: Phase 3 context gathered
+Resume file: .planning/phases/03-optimize-generateGrammar/03-CONTEXT.md

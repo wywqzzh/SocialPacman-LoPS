@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,9 @@ from LoPS.generate_grammar.data_io import (
 from LoPS.generate_grammar.grammar import GrammarLearner
 from LoPS.generate_grammar.state_graph import StateDependencyGraph, load_state_dependency_graph
 from LoPS.generate_grammar.structured import build_structured_output
+
+
+ProgressCallback = Callable[[str, Mapping[str, object]], None]
 
 
 @dataclass
@@ -76,18 +80,41 @@ def prepare_strategy_state_data(
     )
 
 
-def process_strategy_state_file(input_file_name: str, config: GenerateGrammarConfig) -> dict[str, Any]:
+def process_strategy_state_file(
+    input_file_name: str,
+    config: GenerateGrammarConfig,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, Any]:
     """处理单个 StrategySequence 文件并返回结构化输出对象。
 
     输入语义：input_file_name 是输入目录下的文件名；config 提供输入目录、状态图目录和学习参数。
+    progress_callback 可选，用于把文件准备、学习迭代和 skip-gram 检测过程报告给运行脚本。
     输出语义：返回可直接写入磁盘的结构化字典，不在本函数内执行文件写出。
     关键约束：StrategySequence 文件和 StateGraph 文件必须同名，且状态列名由 config.learning.state_names 指定。
     """
 
+    def emit_progress(event: str, payload: Mapping[str, object]) -> None:
+        """给单文件过程事件补充文件名后转发给外部回调。"""
+
+        if progress_callback is None:
+            return
+        enriched_payload = {"input_file_name": input_file_name}
+        enriched_payload.update(dict(payload))
+        progress_callback(event, enriched_payload)
+
     # 单文件处理函数只返回内存结果，不写文件；这样测试和验证脚本都可以复用同一流程。
+    emit_progress("file_start", {})
     strategy_state_data = load_strategy_state_data(
         config.strategy_sequence_dir / input_file_name,
         config.learning.state_names,
+    )
+    emit_progress(
+        "file_loaded",
+        {
+            "raw_token_count": len(strategy_state_data.token_sequence),
+            "state_row_count": len(strategy_state_data.state_features),
+            "participant_count": len(strategy_state_data.participant_file_names),
+        },
     )
     # StateGraph 文件名与 StrategySequence 文件名一一对应。
     state_dependencies = load_state_dependency_graph(config.state_graph_dir / input_file_name)
@@ -95,6 +122,16 @@ def process_strategy_state_file(input_file_name: str, config: GenerateGrammarCon
         strategy_state_data,
         state_dependencies,
         removed_token=config.learning.removed_token,
+    )
+    emit_progress(
+        "file_prepared",
+        {
+            "token_count": len(prepared.token_sequence),
+            "removed_token_count": len(prepared.n_positions),
+            "initial_token_count": len(prepared.initial_tokens),
+            "state_row_count": len(prepared.state_features),
+            "state_count": len(prepared.state_features.columns),
+        },
     )
 
     # GrammarLearner 接收显式参数和内存数据，不知道输入输出目录。
@@ -106,28 +143,81 @@ def process_strategy_state_file(input_file_name: str, config: GenerateGrammarCon
         state_dependencies=prepared.state_dependencies,
         participant_file_names=prepared.participant_file_names,
         participant_ids=prepared.participant_ids,
+        progress_callback=emit_progress,
     )
     # skip_gram 必须在 grammar 学习完成后执行，因为它依赖最终 parsed_sequence。
-    skip_gram = learner.detect_skip_gram(grammar_result, prepared.n_positions)
+    skip_gram = learner.detect_skip_gram(grammar_result, prepared.n_positions, progress_callback=emit_progress)
+    emit_progress(
+        "file_finished",
+        {
+            "grammar_token_count": len(grammar_result.grammar_tokens),
+            "parsed_length": len(grammar_result.parsed_sequence),
+            "skip_gram_found": skip_gram.found,
+        },
+    )
 
     # 核心 pipeline 只返回当前模块定义的结构化结果；验证适配逻辑不进入正式流程。
     return build_structured_output(input_file_name, config.learning, grammar_result, skip_gram)
 
 
-def run_generate_grammar(config: GenerateGrammarConfig) -> list[Path]:
+def run_generate_grammar(
+    config: GenerateGrammarConfig,
+    progress_callback: ProgressCallback | None = None,
+) -> list[Path]:
     """批量运行 generate_grammar 流程并写出结果文件。
 
-    输入语义：config 提供输入、状态图、输出目录和学习参数。
+    输入语义：config 提供输入、状态图、输出目录和学习参数；progress_callback 可选，用于报告批量进度。
     输出语义：返回本轮写出的输出文件路径列表，顺序与排序后的输入文件一致。
     关键约束：运行前会校验配置路径；每个输入文件独立处理并写入 config.output_dir 下的同名文件。
     """
 
+    def emit_progress(event: str, payload: Mapping[str, object]) -> None:
+        """转发批量运行过程事件，未设置回调时保持静默。"""
+
+        if progress_callback is None:
+            return
+        progress_callback(event, payload)
+
     # 全量运行入口：校验路径、排序枚举输入文件、逐个写入 LoPS 输出目录。
     config.validate()
+    input_file_names = list_strategy_state_files(config.strategy_sequence_dir)
+    emit_progress(
+        "run_start",
+        {
+            "file_count": len(input_file_names),
+            "output_dir": str(config.output_dir),
+        },
+    )
     output_paths = []
-    for input_file_name in list_strategy_state_files(config.strategy_sequence_dir):
-        output = process_strategy_state_file(input_file_name, config)
+    for file_index, input_file_name in enumerate(input_file_names, start=1):
+        def emit_file_progress(event: str, payload: Mapping[str, object]) -> None:
+            """给单文件事件补充批量序号后转发。"""
+
+            enriched_payload = {
+                "file_index": file_index,
+                "file_count": len(input_file_names),
+            }
+            enriched_payload.update(dict(payload))
+            emit_progress(event, enriched_payload)
+
+        output = process_strategy_state_file(input_file_name, config, progress_callback=emit_file_progress)
         output_path = config.output_dir / input_file_name
         write_generate_grammar_output(output, output_path)
         output_paths.append(output_path)
+        emit_progress(
+            "file_written",
+            {
+                "file_index": file_index,
+                "file_count": len(input_file_names),
+                "input_file_name": input_file_name,
+                "output_path": str(output_path),
+            },
+        )
+    emit_progress(
+        "run_finished",
+        {
+            "file_count": len(output_paths),
+            "output_dir": str(config.output_dir),
+        },
+    )
     return output_paths

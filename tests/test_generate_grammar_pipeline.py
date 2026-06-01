@@ -46,8 +46,14 @@ class GenerateGrammarPipelineTest(unittest.TestCase):
                 state_graph_dir=STATE_GRAPH_DIR,
                 output_dir=Path(temp_dir),
             )
+            progress_events = []
 
-            output = process_strategy_state_file("031222-401.pkl", config)
+            def capture_progress(event: str, payload: dict[str, object]) -> None:
+                """收集单文件处理过程事件，便于验证运行脚本可打印学习进度。"""
+
+                progress_events.append((event, dict(payload)))
+
+            output = process_strategy_state_file("031222-401.pkl", config, progress_callback=capture_progress)
 
         # 核心 pipeline 返回面向正式模块的结构化分区，格式转换由验证脚本单独处理。
         self.assertEqual(set(output.keys()), {"source", "parameters", "grammar", "parsed", "skip_gram"})
@@ -57,6 +63,16 @@ class GenerateGrammarPipelineTest(unittest.TestCase):
         self.assertIn("participant_ids", structured["source"])
         self.assertIn("original_sequence", structured["parsed"])
         self.assertTrue(structured["grammar"])
+        event_names = [event for event, _ in progress_events]
+        self.assertIn("file_start", event_names)
+        self.assertIn("file_prepared", event_names)
+        self.assertIn("learn_start", event_names)
+        self.assertIn("learn_iteration", event_names)
+        self.assertIn("learn_finished", event_names)
+        self.assertIn("skip_gram", event_names)
+        self.assertIn("file_finished", event_names)
+        # 所有单文件事件都应携带输入文件名，运行脚本才能把过程信息归属到具体被试。
+        self.assertTrue(all(payload["input_file_name"] == "031222-401.pkl" for _, payload in progress_events))
 
 
 if __name__ == "__main__":

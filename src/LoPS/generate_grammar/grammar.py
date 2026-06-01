@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -582,12 +582,14 @@ class GrammarLearner:
         state_dependencies: StateDependencyGraph,
         participant_file_names: list[str],
         participant_ids: list[str],
+        progress_callback: Callable[[str, Mapping[str, object]], None] | None = None,
     ) -> GrammarLearningResult:
         """学习 grammar token 并返回最终解析、概率和组成信息。
 
         输入语义：token_sequence 是已完成输入清理的基础 token 序列；initial_tokens 是初始 token 集；
         state_features 与 token_sequence 按行对齐；state_dependencies 提供状态条件约束；
-        participant_file_names 和 participant_ids 作为结果元数据透传。
+        participant_file_names 和 participant_ids 作为结果元数据透传；progress_callback 可选，用于向运行脚本报告
+        学习过程，不参与算法计算。
         输出语义：返回包含最终 grammar token、概率、时间占比、解析序列和组成关系的 GrammarLearningResult。
         关键约束：每轮新增候选后都从 original_sequence 重新解析；收敛由解析概率分布 KL 均值决定。
         """
@@ -612,8 +614,22 @@ class GrammarLearner:
             for index, token in enumerate(predict_tokens)
         }
         kl_history = []
+        stop_reason = "max_iterations"
+        iterations_completed = 0
 
-        for _ in range(self.params.max_iterations):
+        if progress_callback is not None:
+            progress_callback(
+                "learn_start",
+                {
+                    "sequence_length": len(original_sequence),
+                    "initial_token_count": len(active_tokens),
+                    "initial_parsed_length": len(parsed_sequence),
+                    "state_count": len(state_features.columns),
+                },
+            )
+
+        for iteration in range(1, self.params.max_iterations + 1):
+            iterations_completed = iteration
             # 每轮根据当前解析序列重新组织离散数据，再评估哪些 parent->child 组合值得合并。
             organized = self._organize_discrete_data(
                 parsed_result,
@@ -669,11 +685,45 @@ class GrammarLearner:
                     candidate_scores.append(candidate_score)
 
             if len(candidate_scores) == 0:
+                stop_reason = "no_candidates"
+                if progress_callback is not None:
+                    progress_callback(
+                        "learn_iteration",
+                        {
+                            "iteration": iteration,
+                            "active_tokens": list(active_tokens),
+                            "active_token_count": len(active_tokens),
+                            "parsed_length": len(parsed_sequence),
+                            "candidate_count": 0,
+                            "selected_chunks": [],
+                            "selected_ratios": [],
+                            "kl_divergence": None,
+                            "convergence_mean": None,
+                            "stop_reason": stop_reason,
+                        },
+                    )
                 break
 
             # 一轮可能选出多个接近最佳 ratio 的 chunk；它们按候选筛选顺序追加到 active_tokens。
-            selected_chunks, _, selected_components = self._select_next_chunk(candidate_scores)
+            selected_chunks, selected_ratios, selected_components = self._select_next_chunk(candidate_scores)
             if len(selected_chunks) == 0:
+                stop_reason = "no_selected_chunks"
+                if progress_callback is not None:
+                    progress_callback(
+                        "learn_iteration",
+                        {
+                            "iteration": iteration,
+                            "active_tokens": list(active_tokens),
+                            "active_token_count": len(active_tokens),
+                            "parsed_length": len(parsed_sequence),
+                            "candidate_count": len(candidate_scores),
+                            "selected_chunks": [],
+                            "selected_ratios": [],
+                            "kl_divergence": None,
+                            "convergence_mean": None,
+                            "stop_reason": stop_reason,
+                        },
+                    )
                 break
 
             added_any = False
@@ -685,6 +735,23 @@ class GrammarLearner:
                 components.append(list(selected_components[index]))
                 added_any = True
             if not added_any:
+                stop_reason = "duplicate_chunks"
+                if progress_callback is not None:
+                    progress_callback(
+                        "learn_iteration",
+                        {
+                            "iteration": iteration,
+                            "active_tokens": list(active_tokens),
+                            "active_token_count": len(active_tokens),
+                            "parsed_length": len(parsed_sequence),
+                            "candidate_count": len(candidate_scores),
+                            "selected_chunks": selected_chunks,
+                            "selected_ratios": selected_ratios,
+                            "kl_divergence": None,
+                            "convergence_mean": None,
+                            "stop_reason": stop_reason,
+                        },
+                    )
                 break
 
             # 每次加入新 chunk 后，都从 original_sequence 重新做最长匹配，更新解析序列和对齐状态。
@@ -705,12 +772,32 @@ class GrammarLearner:
                 for token in active_tokens
                 if parsed_result.token_probabilities[token] != 0
             }
-            kl_history.append(kl_divergence(current_distribution, previous_distribution))
+            kl_value = kl_divergence(current_distribution, previous_distribution)
+            kl_history.append(kl_value)
             previous_distribution = dict(current_distribution)
-            if (
-                len(kl_history) >= self.params.convergence_window
-                and np.mean(kl_history[-self.params.convergence_window:]) <= self.params.convergence_kl_threshold
-            ):
+            convergence_mean = None
+            converged = False
+            if len(kl_history) >= self.params.convergence_window:
+                convergence_mean = float(np.mean(kl_history[-self.params.convergence_window:]))
+                converged = convergence_mean <= self.params.convergence_kl_threshold
+            if progress_callback is not None:
+                progress_callback(
+                    "learn_iteration",
+                    {
+                        "iteration": iteration,
+                        "active_tokens": list(active_tokens),
+                        "active_token_count": len(active_tokens),
+                        "parsed_length": len(parsed_sequence),
+                        "candidate_count": len(candidate_scores),
+                        "selected_chunks": selected_chunks,
+                        "selected_ratios": selected_ratios,
+                        "kl_divergence": float(kl_value),
+                        "convergence_mean": convergence_mean,
+                        "stop_reason": "converged" if converged else None,
+                    },
+                )
+            if converged:
+                stop_reason = "converged"
                 break
 
         # 循环结束后，按最终 active_tokens 重新统计 sets/pro/gram/frequency。
@@ -741,6 +828,18 @@ class GrammarLearner:
             weighted_frequencies[index] *= token_length(grammar_token)
         time_probabilities = weighted_frequencies / np.sum(weighted_frequencies)
 
+        if progress_callback is not None:
+            progress_callback(
+                "learn_finished",
+                {
+                    "iterations": iterations_completed,
+                    "stop_reason": stop_reason,
+                    "grammar_token_count": len(grammar_tokens),
+                    "parsed_length": len(parsed_sequence),
+                    "nonzero_token_count": len(active_tokens),
+                },
+            )
+
         return GrammarLearningResult(
             grammar_tokens=grammar_tokens,
             probabilities=probabilities,
@@ -759,6 +858,7 @@ class GrammarLearner:
         self,
         result: GrammarLearningResult,
         n_positions: np.ndarray,
+        progress_callback: Callable[[str, Mapping[str, object]], None] | None = None,
     ) -> SkipGramResult:
         """检测删除 token 与目标 token 的 skip-gram 关系。
 
@@ -769,12 +869,23 @@ class GrammarLearner:
 
         sequence_with_n, n_insert_positions = self._build_skip_gram_sequence(result.parsed_sequence, n_positions)
         trace = self._score_skip_gram_sequence(sequence_with_n, n_insert_positions)
-        if (
-            trace.score_without_parent / trace.score_with_parent > 1
-            and trace.pair_frequency > self.params.skip_gram_min_frequency
-        ):
-            return SkipGramResult(True, trace.posterior[1, 1])
-        return SkipGramResult(False, 0)
+        score_ratio = trace.score_without_parent / trace.score_with_parent
+        found = score_ratio > 1 and trace.pair_frequency > self.params.skip_gram_min_frequency
+        count = trace.posterior[1, 1] if found else 0
+        if progress_callback is not None:
+            progress_callback(
+                "skip_gram",
+                {
+                    "n_count": len(n_positions),
+                    "sequence_with_n_length": len(sequence_with_n),
+                    "n_insert_count": len(n_insert_positions),
+                    "score_ratio": float(score_ratio),
+                    "pair_frequency": float(trace.pair_frequency),
+                    "found": found,
+                    "count": count,
+                },
+            )
+        return SkipGramResult(found, count)
 
     def _build_skip_gram_sequence(
         self,

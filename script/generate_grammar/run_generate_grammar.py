@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -14,6 +15,36 @@ from LoPS.generate_grammar.config import (
     GrammarLearningParams,
 )
 from LoPS.generate_grammar.pipeline import run_generate_grammar
+
+
+def build_progress_printer(progress_interval: int) -> Callable[[str, Mapping[str, object]], None]:
+    """构造只打印每轮学习后 chunk 集合的过程信息函数。
+
+    输入语义：progress_interval 控制学习迭代事件的打印间隔，最小按 1 处理。
+    输出语义：返回一个接收事件名和事件 payload 的回调函数。
+    关键约束：打印函数只响应 learn_iteration 事件，不展示候选数、KL、skip-gram 等其它过程指标。
+    """
+
+    interval = max(1, progress_interval)
+
+    def print_progress(event: str, payload: Mapping[str, object]) -> None:
+        """在每轮学习后打印当前 chunk 集合。"""
+
+        if event != "learn_iteration":
+            return
+
+        file_index = payload.get("file_index")
+        file_count = payload.get("file_count")
+        file_name = payload.get("input_file_name", "-")
+        file_prefix = f"[file {file_index}/{file_count}] {file_name}" if file_index else f"[file] {file_name}"
+        iteration = int(payload.get("iteration") or 0)
+        # 终止迭代无论是否命中间隔都打印，避免收敛或无候选时缺少最终 chunk 集合。
+        if iteration % interval != 0 and payload.get("stop_reason") is None:
+            return
+        chunk_set = list(payload.get("active_tokens") or [])
+        print(f"{file_prefix} iter={iteration} chunks={chunk_set}")
+
+    return print_progress
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,6 +61,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default="data/generate_grammar/refactored-output/grammar")
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--max-iterations", type=int, default=100000)
+    parser.add_argument("--progress-interval", type=int, default=1, help="每隔多少轮学习迭代打印一次过程信息。")
+    parser.add_argument("--quiet", action="store_true", help="只打印最终摘要，不打印学习过程信息。")
     return parser.parse_args()
 
 
@@ -55,7 +88,8 @@ def main() -> None:
         output_dir=args.output_dir,
         learning=learning,
     )
-    output_paths = run_generate_grammar(config)
+    progress_callback = None if args.quiet else build_progress_printer(args.progress_interval)
+    output_paths = run_generate_grammar(config, progress_callback=progress_callback)
     # 输出简短运行结果，便于 shell 调用和验证报告记录。
     print(f"Generated {len(output_paths)} files in {config.output_dir}")
 

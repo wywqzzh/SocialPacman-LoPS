@@ -21,9 +21,9 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("subject", nargs="?", default="041122-403")
-    parser.add_argument("--frame-data-dir", type=Path, default=PROJECT_ROOT / "pipeline_data/pacman_data/frame_data")
-    parser.add_argument("--grammar-dir", type=Path, default=PROJECT_ROOT / "pipeline_data/pacman_video/grammar_data")
-    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "pipeline_data/pacman_video/render_data")
+    parser.add_argument("--frame-data-dir", type=Path, default=PROJECT_ROOT / "data/02_frame_data")
+    parser.add_argument("--grammar-dir", type=Path, default=PROJECT_ROOT / "data/pacman_video/grammar_data")
+    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "data/pacman_video/render_data")
     parser.add_argument("--ghost-count", choices=["2", "4", "all"], default="2")
     return parser.parse_args()
 

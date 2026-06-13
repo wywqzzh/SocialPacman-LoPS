@@ -19,14 +19,14 @@ from LoPS.pacman_data.mat_to_raw_subject_data import convert_mat_root_to_raw_sub
 def parse_args() -> argparse.Namespace:
     """解析 raw_subject_data 生成脚本参数。
 
-    输入语义：默认路径指向当前 LoPS 仓库的 `pipeline_data`，也允许调用方显式覆盖。
+    输入语义：默认路径指向当前 LoPS 仓库的 `data`，也允许调用方显式覆盖。
     输出语义：返回包含输入目录、输出目录、session 白名单和并行数的命令行参数。
     关键约束：默认路径只在脚本层存在，正式模块不内置数据目录。
     """
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--raw-root", type=Path, default=PROJECT_ROOT / "pipeline_data/raw_mat_data")
-    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "pipeline_data/pacman_data/raw_subject_data")
+    parser.add_argument("--raw-root", type=Path, default=PROJECT_ROOT / "data/00_raw_mat_data")
+    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "data/01_raw_subject_data")
     parser.add_argument("--workers", type=int, default=34)
     parser.add_argument("sessions", nargs="*", help="可选：只处理这些 session。")
     return parser.parse_args()

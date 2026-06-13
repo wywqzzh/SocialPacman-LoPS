@@ -28,21 +28,21 @@ def parse_args() -> argparse.Namespace:
 
     输入语义：调用方可以覆盖输入目录、输出目录、常量目录、并行数和 raw Q 策略参数。
     输出语义：返回可直接构造配置并驱动目录处理的参数对象。
-    关键约束：默认路径指向当前仓库的 pipeline_data，不依赖旧项目路径。
+    关键约束：默认路径指向当前仓库的 data 主流程目录，不依赖旧项目路径。
     """
 
-    data_root = PROJECT_ROOT / "pipeline_data"
+    data_root = PROJECT_ROOT / "data"
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--input-dir",
         type=Path,
-        default=data_root / "human_tile_data_preprocess" / "corrected_tile_data",
+        default=data_root / "04_corrected_tile_data",
         help="corrected tile 输入目录。",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=data_root / "calculate_utility" / "utility_data",
+        default=data_root / "05_utility_data",
         help="集中 utility 输出目录。",
     )
     parser.add_argument(

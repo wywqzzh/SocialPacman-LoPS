@@ -652,10 +652,10 @@ def parse_args() -> argparse.Namespace:
     关键约束：默认路径全部位于 LoPS 仓库内，不依赖旧项目。
     """
 
-    data_root = project_root() / "pipeline_data"
+    data_root = project_root() / "data"
     parser = argparse.ArgumentParser(description="按旧规则修正人类策略权重数据。")
-    parser.add_argument("--input-dir", type=Path, default=data_root / "dynamic_strategy_fitting" / "weight_data")
-    parser.add_argument("--output-dir", type=Path, default=data_root / "revise_human_weight" / "corrected_weight_data")
+    parser.add_argument("--input-dir", type=Path, default=data_root / "06_weight_data")
+    parser.add_argument("--output-dir", type=Path, default=data_root / "07_corrected_weight_data")
     parser.add_argument("--processes", type=int, default=min(8, os.cpu_count() or 1))
     parser.add_argument("--scared-time", type=int, default=63)
     return parser.parse_args()

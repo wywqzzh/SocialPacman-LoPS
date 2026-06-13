@@ -20,9 +20,9 @@ def parse_args() -> argparse.Namespace:
     """解析 frame_data 生成脚本参数。"""
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-dir", type=Path, default=PROJECT_ROOT / "pipeline_data/pacman_data/raw_subject_data")
-    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "pipeline_data/pacman_data/frame_data")
-    parser.add_argument("--csv-output-dir", type=Path, default=PROJECT_ROOT / "pipeline_data/pacman_data/frame_data_csv")
+    parser.add_argument("--input-dir", type=Path, default=PROJECT_ROOT / "data/01_raw_subject_data")
+    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "data/02_frame_data")
+    parser.add_argument("--csv-output-dir", type=Path, default=PROJECT_ROOT / "data/02_frame_data_csv")
     parser.add_argument("--workers", type=int, default=34)
     parser.add_argument("--write-csv", action="store_true")
     parser.add_argument("sessions", nargs="*", help="可选：只处理这些 session。")

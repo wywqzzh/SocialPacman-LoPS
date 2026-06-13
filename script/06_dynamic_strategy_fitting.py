@@ -31,18 +31,18 @@ def parse_args() -> argparse.Namespace:
     关键约束：默认路径只指向当前 LoPS 仓库 data 目录，不依赖旧项目路径。
     """
 
-    data_root = PROJECT_ROOT / "pipeline_data"
+    data_root = PROJECT_ROOT / "data"
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--input-dir",
         type=Path,
-        default=data_root / "calculate_utility" / "utility_data",
+        default=data_root / "05_utility_data",
         help="calculate_utility 输出的拟合输入目录。",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=data_root / "dynamic_strategy_fitting" / "weight_data",
+        default=data_root / "06_weight_data",
         help="动态拟合 WeightData 输出目录。",
     )
     parser.add_argument(

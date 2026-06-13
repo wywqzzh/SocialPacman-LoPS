@@ -4,7 +4,7 @@
 这个模块替代旧的 ``GenerateVideos_.py`` 中和画图强相关的数据准备逻辑。
 核心目标是把 tile-level 的模型/策略结果对齐到 frame-level 的逐帧游戏数据，
 并生成渲染脚本可以直接读取的规范 PKL 文件。当前默认读取
-``pipeline_data/pacman_data/frame_data`` 中的 frame_data，不再依赖历史导出的
+``data/02_frame_data`` 中的 frame_data，不再依赖历史导出的
 ``data/*.mat`` 或 ``data/*.txt``。
 """
 
@@ -355,7 +355,7 @@ def _looks_like_real_position(value: object) -> bool:
 def read_frame_table(path: Path) -> pd.DataFrame:
     """读取逐帧游戏状态表。
 
-    主流程使用 ``pipeline_data/pacman_data/frame_data/*.pkl``。保留 CSV 读取能力只是为了
+    主流程使用 ``data/02_frame_data/*.pkl``。保留 CSV 读取能力只是为了
     人工排查历史文件，不作为默认数据依赖。
     """
 

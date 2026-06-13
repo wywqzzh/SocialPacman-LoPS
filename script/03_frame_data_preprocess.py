@@ -22,20 +22,20 @@ def parse_args() -> argparse.Namespace:
 
     输入语义：允许调用方覆盖 frame_data 输入目录、标准化输出目录和并行数。
     输出语义：返回 argparse Namespace。
-    关键约束：默认路径指向 pipeline_data，使完整流程运行时不污染 data/ 验证目录。
+    关键约束：默认路径指向当前仓库的 data 主流程目录。
     """
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--input-dir",
         type=Path,
-        default=PROJECT_ROOT / "pipeline_data/pacman_data/frame_data",
+        default=PROJECT_ROOT / "data/02_frame_data",
         help="raw frame_data 输入目录。",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=PROJECT_ROOT / "pipeline_data/pacman_data/preprocessed_frame_data",
+        default=PROJECT_ROOT / "data/03_preprocessed_frame_data",
         help="标准化 frame_data 输出目录。",
     )
     parser.add_argument("--workers", type=int, default=min(34, os.cpu_count() or 1), help="并行进程数。")

@@ -3,7 +3,7 @@
 
 本脚本是 ``DataPreProcessHuman.py`` 的当前项目重构入口，只负责数据处理，
 不依赖旧项目代码或旧项目数据目录。输入、输出路径由命令行参数控制，默认
-指向当前仓库 ``data/human_tile_data_preprocess`` 下的数据目录。
+指向当前仓库 ``data`` 下按流程编号组织的数据目录。
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import pandas as pd
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_PIPELINE_ROOT = PROJECT_ROOT / "pipeline_data"
+DEFAULT_DATA_ROOT = PROJECT_ROOT / "data"
 TUNNEL_LEFT = (0, 18)
 TUNNEL_RIGHT = (30, 18)
 INVALID_PACMAN_POSITIONS = {(-1, 18), (31, 18)}
@@ -562,17 +562,17 @@ def parse_args() -> argparse.Namespace:
     """
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--frame-dir", type=Path, default=DEFAULT_PIPELINE_ROOT / "pacman_data/preprocessed_frame_data")
-    parser.add_argument("--tile-dir", type=Path, default=DEFAULT_PIPELINE_ROOT / "human_tile_data_preprocess/tile_data")
+    parser.add_argument("--frame-dir", type=Path, default=DEFAULT_DATA_ROOT / "03_preprocessed_frame_data")
+    parser.add_argument("--tile-dir", type=Path, default=DEFAULT_DATA_ROOT / "04_tile_data")
     parser.add_argument(
         "--corrected-dir",
         type=Path,
-        default=DEFAULT_PIPELINE_ROOT / "human_tile_data_preprocess/corrected_tile_data",
+        default=DEFAULT_DATA_ROOT / "04_corrected_tile_data",
     )
     parser.add_argument(
         "--adjacent-map",
         type=Path,
-        default=DEFAULT_PIPELINE_ROOT / "constant_data/adjacent_map_fmri.csv",
+        default=DEFAULT_DATA_ROOT / "constant_data/adjacent_map_fmri.csv",
         help="用于计算 available_dir 的 fMRI 邻接表。",
     )
     parser.add_argument("--sample-rate", type=int, default=25)

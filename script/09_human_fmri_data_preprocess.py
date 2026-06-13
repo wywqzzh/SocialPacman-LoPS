@@ -358,30 +358,30 @@ def process_human_fmri_data(
 def parse_args() -> argparse.Namespace:
     """解析命令行参数，允许外部指定各阶段输入输出目录。"""
 
-    data_root = project_root() / "pipeline_data"
+    data_root = project_root() / "data"
     parser = argparse.ArgumentParser(description="完整执行 human fMRI ghost2 数据预处理。")
     parser.add_argument(
         "--raw-discrete-dir",
         type=Path,
-        default=data_root / "extract_features_human" / "discrete_feature_data",
+        default=data_root / "08_discrete_feature_data",
         help="原始 fMRI 离散特征数据目录；当前旧数据状态下该目录为空。",
     )
     parser.add_argument(
         "--ghost2-discrete-dir",
         type=Path,
-        default=data_root / "human_fmri_data_preprocess" / "fmri_discrete_feature_data_ghost2",
+        default=data_root / "09_fmri_discrete_feature_data_ghost2",
         help="ghost2 离散特征数据目录；既是分流输出，也是 formed 阶段输入。",
     )
     parser.add_argument(
         "--formed-ghost2-dir",
         type=Path,
-        default=data_root / "human_fmri_data_preprocess" / "fmri_formed_data_ghost2",
+        default=data_root / "09_fmri_formed_data_ghost2",
         help="ghost2 formed 数据输出目录。",
     )
     parser.add_argument(
         "--strategy-sequence-dir",
         type=Path,
-        default=data_root / "human_fmri_data_preprocess" / "strategy_sequence",
+        default=data_root / "09_strategy_sequence",
         help="最终 StrategySequence 输出目录。",
     )
     return parser.parse_args()

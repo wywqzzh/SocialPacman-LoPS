@@ -28,8 +28,8 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("subject", nargs="?", default="041122-403")
-    parser.add_argument("--frame-root", type=Path, default=PROJECT_ROOT / "pipeline_data/pacman_video/frame_images")
-    parser.add_argument("--video-root", type=Path, default=PROJECT_ROOT / "pipeline_data/pacman_video/video_data")
+    parser.add_argument("--frame-root", type=Path, default=PROJECT_ROOT / "data/pacman_video/frame_images")
+    parser.add_argument("--video-root", type=Path, default=PROJECT_ROOT / "data/pacman_video/video_data")
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--crf", type=int, default=18)
     parser.add_argument(

@@ -520,13 +520,13 @@ def parse_args() -> argparse.Namespace:
     关键约束：默认目录全部位于 LoPS 仓库内，不依赖旧项目路径。
     """
 
-    data_root = project_root() / "pipeline_data"
+    data_root = project_root() / "data"
     default_processes = min(34, os.cpu_count() or 1)
     parser = argparse.ArgumentParser(description="提取人类 CorrectedWeightData 的连续特征和离散特征。")
     parser.add_argument(
         "--input-dir",
         type=Path,
-        default=data_root / "revise_human_weight" / "corrected_weight_data",
+        default=data_root / "07_corrected_weight_data",
         help="扁平 CorrectedWeightData 输入目录。",
     )
     parser.add_argument(
@@ -538,13 +538,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--feature-output-dir",
         type=Path,
-        default=data_root / "extract_features_human" / "feature_data",
+        default=data_root / "08_feature_data",
         help="连续特征输出目录。",
     )
     parser.add_argument(
         "--discrete-output-dir",
         type=Path,
-        default=data_root / "extract_features_human" / "discrete_feature_data",
+        default=data_root / "08_discrete_feature_data",
         help="离散特征输出目录。",
     )
     parser.add_argument(

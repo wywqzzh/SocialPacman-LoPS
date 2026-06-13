@@ -26,14 +26,14 @@ def parse_args() -> argparse.Namespace:
 
     输入语义：调用方提供当前结构化 grammar 输出目录和聚类数量。
     输出语义：返回 argparse 参数对象。
-    关键约束：默认只面向当前 pipeline_data 的结构化 grammar 输出，不兼容旧版 grammar pickle。
+    关键约束：默认只面向当前 data 主流程的结构化 grammar 输出，不兼容旧版 grammar pickle。
     """
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--grammar-dir",
         type=Path,
-        default=PROJECT_ROOT / "pipeline_data/generate_grammar/grammar",
+        default=PROJECT_ROOT / "data/11_grammar",
         help="当前 generate_grammar 结构化输出目录。",
     )
     parser.add_argument("--cluster-count", type=int, default=2, help="聚类数量，旧版 DividePerson 固定为 2。")

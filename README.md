@@ -1,65 +1,50 @@
 # LoPS
 
-## 项目目标
+LoPS 是 Pacman 行为数据分析流程的重构仓库。当前主分析流程已经整理为
+`script/` 根目录下按执行顺序编号的入口脚本，所有默认输入和输出都写入
+`data/` 下按阶段编号组织的目录。
 
-LoPS 用于多轮科研脚本重构，不是每轮重构都新建一个 GSD project。每一轮由用户指定目标脚本、运行环境和数据来源，项目先记录入口信息，再进入后续分析、方案确认、实现和一致性验证。
-
-Phase 1 只建立最小入口骨架，帮助第一轮真实重构尽快开始；它不分析具体脚本、不执行重构。
-
-## 目录职责
+## 主要目录
 
 - `src/LoPS/`：可复用正式模块。
-- `src/LoPS/temp/`：仅用于验证阶段的临时旧实现副本，验证后清理。
-- `script/`：运行新模块或验证流程的脚本入口；每个重构模块放在独立子目录中。
-- `data/`：当前脚本和测试使用的数据，包括需要纳入项目的输入、脚本输出和验证输出。
-- `docs/`：项目说明、提示和人工文档。
-- `.planning/phases/`：GSD 阶段计划和上下文。
-- `.planning/runs/`：多轮科研脚本重构实例的入口信息和分析记录；不要在这里放脚本输入、脚本输出或测试产物。
+- `script/`：主分析流程入口，`01` 到 `12` 对应完整非视频数据处理流程。
+- `script/pacman_video/`：视频渲染相关入口。
+- `data/`：当前流程的原始输入、中间结果、最终输出和视频数据。
+- `docs/`：人工说明和阶段性审计文档。
+- `docs/data_flow.html`：带左侧目录导航的数据流程说明页面。
 
-## 开始一轮重构
+## 主分析流程
 
-新建一轮重构时，创建目录：
+| 顺序 | 脚本 | 默认输入 | 默认输出 |
+|---:|---|---|---|
+| 1 | `script/01_mat_to_raw_subject_data.py` | `data/00_raw_mat_data` | `data/01_raw_subject_data` |
+| 2 | `script/02_raw_subject_data_to_frame_data.py` | `data/01_raw_subject_data` | `data/02_frame_data` |
+| 3 | `script/03_frame_data_preprocess.py` | `data/02_frame_data` | `data/03_preprocessed_frame_data` |
+| 4 | `script/04_human_tile_data_preprocess.py` | `data/03_preprocessed_frame_data` | `data/04_tile_data`, `data/04_corrected_tile_data` |
+| 5 | `script/05_calculate_utility.py` | `data/04_corrected_tile_data` | `data/05_utility_data` |
+| 6 | `script/06_dynamic_strategy_fitting.py` | `data/05_utility_data` | `data/06_weight_data` |
+| 7 | `script/07_revise_human_weight.py` | `data/06_weight_data` | `data/07_corrected_weight_data` |
+| 8 | `script/08_extract_features_human.py` | `data/07_corrected_weight_data` | `data/08_feature_data`, `data/08_discrete_feature_data` |
+| 9 | `script/09_human_fmri_data_preprocess.py` | `data/08_discrete_feature_data` | `data/09_fmri_discrete_feature_data_ghost2`, `data/09_fmri_formed_data_ghost2`, `data/09_strategy_sequence` |
+| 10 | `script/10_state_dependency_graph.py` | `data/09_strategy_sequence` | `data/10_state_dependency_graph_data` |
+| 11 | `script/11_generate_grammar.py` | `data/09_strategy_sequence`, `data/10_state_dependency_graph_data` | `data/11_grammar` |
+| 12 | `script/12_divide_person.py` | `data/11_grammar` | 只打印结果，不保存文件 |
 
-```text
-.planning/runs/YYYY-MM-DD-short-name/
-```
+完整命令见 `data/README.md`。
 
-然后从 `.planning/runs/INTAKE-TEMPLATE.md` 复制内容，创建：
+## 视频流程
 
-```text
-.planning/runs/YYYY-MM-DD-short-name/intake.md
-```
+视频流程独立于主分析链路，默认读取 `data/02_frame_data` 和
+`data/pacman_video` 下的数据：
 
-`short-name` 使用小写 ASCII 字母、数字和连字符，建议从目标脚本或科研功能派生。
+| 顺序 | 脚本 | 默认输入 | 默认输出 |
+|---:|---|---|---|
+| 1 | `script/pacman_video/run_render_table.py` | `data/02_frame_data`, `data/pacman_video/grammar_data` | `data/pacman_video/render_data` |
+| 2 | `script/pacman_video/run_frame_renderer.py` | `data/pacman_video/render_data` | `data/pacman_video/frame_images` |
+| 3 | `script/pacman_video/run_video_renderer.py` | `data/pacman_video/frame_images` | `data/pacman_video/video_data` |
 
-## 最低必填信息
+## 运行约束
 
-进入后续分析前，`intake.md` 至少需要填写：
-
-- 目标脚本路径
-- 运行环境
-- 数据来源
-
-运行命令、必要权限、预期输出可以先写“待补充”，表示这些信息尚未确认。
-
-脚本需要在 LoPS 仓库内保存的数据必须放在 `data/` 下的对应子目录中；`.planning` 只保存计划、讨论、分析和验证结论文档。
-
-正式模块位于 `src/LoPS/`，不得保存旧项目或其它项目的数据目录、代码目录等绝对路径。运行脚本可以为本仓库 `data/` 下的固定目录设置默认参数，测试和其它调用方也应显式构造配置。
-
-## 重构独立性规则
-
-新版本正式代码必须完全不依赖旧版本任何内容，包括旧版本代码、旧版本数据目录和旧版本数据文件。所有运行、测试和验证需要使用的数据都必须复制或整理到当前 LoPS 仓库的 `data/` 下，所有输出也必须写入当前 LoPS 仓库。
-
-新版本设计阶段默认不考虑旧版本兼容性，包括不为了兼容旧版本输出数据格式而污染新模块的数据结构、接口和内部流程。若需要进行新旧结果比对，可以专门编写验证脚本或独立适配模块，把新版本输出转换成旧版本输出格式后再比较；此类转换逻辑必须与正式核心模块隔离。
-
-## 注释规则
-
-代码注释用于说明功能、解释过程、标明关键数据含义和边界条件，不用于反复描述与旧版本代码的差异。每个函数和类都必须在定义体开头使用三引号 docstring 说明功能、输入输出语义和关键约束。函数或方法内部只在重点逻辑、难点逻辑、数据形态转换和容易误解的边界条件处写中文中间注释，避免为显而易见的赋值或语法写空泛注释。
-
-## 安全提醒
-
-不要记录 API keys、密码、token 或私有凭据。需要权限或凭据时，只记录“需要用户授权”或“待补充”，不要写入实际秘密值。
-
-## 当前阶段边界
-
-Phase 1 只建立最小入口骨架。具体外部脚本的功能分析、模块化必要性评估、重构方案、代码修改和一致性验证属于后续阶段。
+- 正式模块不得依赖旧项目路径。
+- 默认运行数据只来自当前仓库的 `data/`。
+- 若需要和历史结果对比，应使用独立验证脚本或一次性验证代码，不把旧格式适配逻辑写入正式模块。

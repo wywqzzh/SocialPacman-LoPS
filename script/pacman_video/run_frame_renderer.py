@@ -21,8 +21,8 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("subject", nargs="?", default="041122-403")
-    parser.add_argument("--render-table-dir", type=Path, default=PROJECT_ROOT / "pipeline_data/pacman_video/render_data")
-    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "pipeline_data/pacman_video/frame_images")
+    parser.add_argument("--render-table-dir", type=Path, default=PROJECT_ROOT / "data/pacman_video/render_data")
+    parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "data/pacman_video/frame_images")
     parser.add_argument("--trial", default=None)
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=None)

@@ -2,10 +2,10 @@
 """把已渲染的 Pacman JPG 帧合成为 MP4 视频。
 
 输入固定为：
-    pipeline_data/pacman_video/frame_images/{subject}/{game}/00001.jpg
+    data/pacman_video/frame_images/{subject}/{game}/00001.jpg
 
 输出固定为：
-    pipeline_data/pacman_video/video_data/{subject}/{game}.mp4
+    data/pacman_video/video_data/{subject}/{game}.mp4
 
 每个 game 子文件夹会生成一个独立 MP4。脚本使用 ffmpeg 编码视频，不再引入
 额外 Python 视频写入依赖。

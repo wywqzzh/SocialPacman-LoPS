@@ -18,8 +18,6 @@ ALL_STRATEGY_NAMES = [
     "local",
     "evade_blinky",
     "evade_clyde",
-    "evade_3",
-    "evade_4",
     "approach",
     "energizer",
     "no_energizer",
@@ -47,7 +45,7 @@ NEIGHBOR_FEATURE_NAMES = [
     "no_energizer",
     "stay",
 ]
-STATE_OUTPUT_NAMES = ["IS1", "IS2", "PG1", "PG2", "PE", "BN5", "BN10"]
+STATE_OUTPUT_NAMES = ["IS1", "IS2", "PG1", "PG2", "PE", "BW10", "BB10"]
 STRATEGY_OUTPUT_NAMES = [
     "global",
     "local",
@@ -65,13 +63,22 @@ STRATEGY_ID_TO_LABEL = {
     1: "L",
     2: "1",
     3: "2",
-    4: "3",
-    5: "4",
     6: "A",
     7: "E",
     8: "N",
     9: "V",
     10: "S",
+}
+STRATEGY_ID_TO_COLUMN = {
+    0: "global",
+    1: "local",
+    2: "evade_blinky",
+    3: "evade_clyde",
+    6: "approach",
+    7: "energizer",
+    8: "no_energizer",
+    9: "vague",
+    10: "stay",
 }
 
 
@@ -96,94 +103,98 @@ def save_pickle(data: Any, path: Path) -> None:
 
 
 def build_game_id(data: pd.DataFrame) -> pd.Series:
-    """根据 `file` 字段生成 game 标识，用于按单局游戏分组。"""
+    """根据 `DayTrial` 字段生成 game_id，用于按单局游戏分组。
 
-    return data["file"].str.split("-").apply(lambda parts: "-".join([parts[0]] + parts[2:]))
+    输入语义：data 必须包含 DayTrial，通常已经由上游携带 game_id。
+    输出语义：返回从 DayTrial 去掉 trial round 后得到的 game_id。
+    关键约束：该函数只作为缺失 game_id 时的兜底，不重新引入旧 file 字段。
+    """
+
+    return data["DayTrial"].astype(str).str.split("-").apply(lambda parts: "-".join([parts[0]] + parts[2:]))
 
 
-def split_fmri_discrete_feature_data(raw_dir: Path, ghost2_dir: Path, ghost4_dir: Path) -> dict[str, int]:
-    """按是否存在第三个 ghost 将原始离散特征数据拆分为 ghost2 和 ghost4 数据。"""
+def split_fmri_discrete_feature_data(raw_dir: Path, ghost2_dir: Path) -> dict[str, int]:
+    """把离散特征数据整理为 two-ghost fMRI 输入。
+
+    输入语义：raw_dir 是 extract_features_human 输出的离散特征目录。
+    输出语义：所有文件都会写入 ghost2_dir，并保证存在 game_id 字段。
+    关键约束：当前主流程已经只保留 two-ghost 数据，不再做二鬼/四鬼分流。
+    """
 
     raw_files = list_pickle_files(raw_dir)
     ghost2_dir.mkdir(parents=True, exist_ok=True)
-    ghost4_dir.mkdir(parents=True, exist_ok=True)
 
     written_ghost2 = 0
-    written_ghost4 = 0
     for file_name in raw_files:
         data = pd.read_pickle(raw_dir / file_name)
 
-        # `game` 是旧流程保存到分流数据中的字段，后续 formed 阶段会重新计算并最终删除。
-        data["game"] = build_game_id(data)
-        ghost2_groups: list[pd.DataFrame] = []
-        ghost4_groups: list[pd.DataFrame] = []
-        for _, group in data.groupby("game"):
-            if np.sum(group["IS_EXIST3"]) / len(group) == 1:
-                ghost4_groups.append(deepcopy(group))
-            else:
-                ghost2_groups.append(deepcopy(group))
-
-        if ghost2_groups:
-            pd.concat(ghost2_groups, axis=0).to_pickle(ghost2_dir / file_name)
-            written_ghost2 += 1
-        if ghost4_groups:
-            pd.concat(ghost4_groups, axis=0).to_pickle(ghost4_dir / file_name)
-            written_ghost4 += 1
+        if "game_id" not in data.columns:
+            data["game_id"] = build_game_id(data)
+        data.to_pickle(ghost2_dir / file_name)
+        written_ghost2 += 1
 
     return {
         "raw_files": len(raw_files),
         "written_ghost2_files": written_ghost2,
-        "written_ghost4_files": written_ghost4,
     }
 
 
-def encode_strategy_to_onehot(strategy_id: int, strategy_count: int) -> np.ndarray:
-    """将单个策略编号转为 1/2 编码的 one-hot 向量。"""
+def encode_strategy_to_onehot(strategy_id: int, strategy_names: list[str]) -> np.ndarray:
+    """将单个旧策略编号转为 1/2 编码的 one-hot 向量。
 
-    encoded = np.ones(strategy_count, dtype=np.int64)
-    encoded[int(strategy_id)] = 2
+    输入语义：strategy_id 保留旧流程的非连续编号，strategy_names 是当前输出列顺序。
+    输出语义：返回与 strategy_names 对齐的 1/2 编码向量。
+    关键约束：3/4 鬼策略列已删除，不能再把旧编号直接当作列下标。
+    """
+
+    strategy_id = int(strategy_id)
+    if strategy_id not in STRATEGY_ID_TO_COLUMN:
+        raise ValueError(f"未知策略编号：{strategy_id}")
+    encoded = np.ones(len(strategy_names), dtype=np.int64)
+    encoded[strategy_names.index(STRATEGY_ID_TO_COLUMN[strategy_id])] = 2
     return encoded
 
 
-def combine_evade_columns(row: pd.Series) -> int:
-    """将多个 evade 策略列合并为一个 1/2 编码的 `evade` 字段。"""
-
-    return 2 if 2 in list(row) else 1
-
-
 def form_strategy_onehot(data: pd.DataFrame) -> pd.DataFrame:
-    """把 `strategy` 编号列展开为策略 one-hot 列，并补充合并后的 evade 字段。"""
+    """把 `strategy` 编号列展开为策略 one-hot 列。
+
+    输入语义：data 是 two-ghost 离散特征表，包含 strategy 编号。
+    输出语义：返回追加策略 one-hot 列后的 DataFrame。
+    关键约束：当前数据流不再生成合并的 evade 字段，避免后续状态表携带未使用冗余列。
+    """
 
     data = data.copy()
     data.reset_index(drop=True, inplace=True)
 
     # 旧数据使用 1/2 表示布尔状态：1 表示未启用，2 表示启用。
-    strategies = np.stack(data["strategy"].apply(lambda value: encode_strategy_to_onehot(value, len(ALL_STRATEGY_NAMES))))
+    strategies = np.stack(data["strategy"].apply(lambda value: encode_strategy_to_onehot(value, ALL_STRATEGY_NAMES)))
     encoded_strategies = (
         pd.DataFrame(strategies == strategies.max(axis=1, keepdims=True), columns=ALL_STRATEGY_NAMES).astype(int) + 1
     )
     data[ALL_STRATEGY_NAMES] = encoded_strategies
 
-    # ghost2 数据中的 evade_3/evade_4 通常恒为 1，但保留四列合并逻辑以覆盖原脚本语义。
-    evade_columns = ["evade_blinky", "evade_clyde", "evade_3", "evade_4"]
-    data["evade"] = data[evade_columns].apply(combine_evade_columns, axis=1)
     return data
 
 
 def keep_first_point_per_strategy_segment(data: pd.DataFrame, strategy_names: list[str]) -> pd.DataFrame:
-    """在每个 game 内只保留连续相同策略段的第一个时间点。"""
+    """在每个 game_id 内只保留连续相同策略段的第一个时间点。
+
+    输入语义：data 是已经展开策略 one-hot 的单被试数据。
+    输出语义：返回每个连续策略段首行组成的 formed 数据。
+    关键约束：game_id 从上游持续保留；本阶段不创建或删除旧 game 字段。
+    """
 
     data = data.copy()
-    data["game"] = build_game_id(data)
+    if "game_id" not in data.columns:
+        data["game_id"] = build_game_id(data)
     selected_groups: list[pd.DataFrame] = []
-    for _, group in data.groupby("game"):
+    for _, group in data.groupby("game_id"):
         # 只要任一策略列与上一行不同，就认为进入了新的策略段，需要保留该行。
         first_point_mask = (group[strategy_names] == group[strategy_names].shift(1)).sum(axis=1) < len(strategy_names)
         selected_groups.append(deepcopy(group.loc[first_point_mask]))
 
     formed_data = pd.concat(selected_groups, axis=0)
     formed_data = formed_data.sort_index()
-    formed_data.drop(columns="game", inplace=True)
     formed_data.reset_index(drop=True, inplace=True)
     return formed_data
 
@@ -322,13 +333,12 @@ def consolidate_strategy_sequences(formed_dir: Path, output_dir: Path) -> dict[s
 def process_human_fmri_data(
     raw_discrete_dir: Path,
     ghost2_discrete_dir: Path,
-    ghost4_discrete_dir: Path,
     formed_ghost2_dir: Path,
     strategy_sequence_dir: Path,
 ) -> dict[str, dict[str, int]]:
     """完整执行当前 human fMRI 数据预处理流程。"""
 
-    split_summary = split_fmri_discrete_feature_data(raw_discrete_dir, ghost2_discrete_dir, ghost4_discrete_dir)
+    split_summary = split_fmri_discrete_feature_data(raw_discrete_dir, ghost2_discrete_dir)
 
     # 当前旧项目的 raw 目录为空，旧脚本会继续使用已经存在的 ghost2 目录；这里显式检查该输入。
     if not list_pickle_files(ghost2_discrete_dir):
@@ -348,36 +358,30 @@ def process_human_fmri_data(
 def parse_args() -> argparse.Namespace:
     """解析命令行参数，允许外部指定各阶段输入输出目录。"""
 
-    data_root = project_root() / "data" / "human_fmri_data_preprocess"
+    data_root = project_root() / "pipeline_data"
     parser = argparse.ArgumentParser(description="完整执行 human fMRI ghost2 数据预处理。")
     parser.add_argument(
         "--raw-discrete-dir",
         type=Path,
-        default=data_root / "fmri_discrete_feature_data",
+        default=data_root / "extract_features_human" / "discrete_feature_data",
         help="原始 fMRI 离散特征数据目录；当前旧数据状态下该目录为空。",
     )
     parser.add_argument(
         "--ghost2-discrete-dir",
         type=Path,
-        default=data_root / "fmri_discrete_feature_data_ghost2",
+        default=data_root / "human_fmri_data_preprocess" / "fmri_discrete_feature_data_ghost2",
         help="ghost2 离散特征数据目录；既是分流输出，也是 formed 阶段输入。",
-    )
-    parser.add_argument(
-        "--ghost4-discrete-dir",
-        type=Path,
-        default=data_root / "fmri_discrete_feature_data_ghost4",
-        help="ghost4 离散特征数据目录；本轮只验证其与当前旧输出一致。",
     )
     parser.add_argument(
         "--formed-ghost2-dir",
         type=Path,
-        default=data_root / "fmri_formed_data_ghost2",
+        default=data_root / "human_fmri_data_preprocess" / "fmri_formed_data_ghost2",
         help="ghost2 formed 数据输出目录。",
     )
     parser.add_argument(
         "--strategy-sequence-dir",
         type=Path,
-        default=data_root / "strategy_sequence",
+        default=data_root / "human_fmri_data_preprocess" / "strategy_sequence",
         help="最终 StrategySequence 输出目录。",
     )
     return parser.parse_args()
@@ -390,7 +394,6 @@ def main() -> None:
     summary = process_human_fmri_data(
         raw_discrete_dir=args.raw_discrete_dir,
         ghost2_discrete_dir=args.ghost2_discrete_dir,
-        ghost4_discrete_dir=args.ghost4_discrete_dir,
         formed_ghost2_dir=args.formed_ghost2_dir,
         strategy_sequence_dir=args.strategy_sequence_dir,
     )

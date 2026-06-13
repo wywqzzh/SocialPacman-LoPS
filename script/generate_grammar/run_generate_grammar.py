@@ -59,14 +59,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--strategy-sequence-dir",
         type=Path,
-        default="data/human_fmri_data_preprocess/strategy_sequence",
+        default="pipeline_data/human_fmri_data_preprocess/strategy_sequence",
     )
     parser.add_argument(
         "--state-graph-dir",
         type=Path,
-        default="data/state_dependency_graph/state_dependency_graph_data",
+        default="pipeline_data/state_dependency_graph/state_dependency_graph_data",
     )
-    parser.add_argument("--output-dir", type=Path, default="data/generate_grammar/refactored-output/grammar")
+    parser.add_argument("--output-dir", type=Path, default="pipeline_data/generate_grammar/grammar")
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--max-iterations", type=int, default=100000)
     parser.add_argument("--progress-interval", type=int, default=1, help="每隔多少轮学习迭代打印一次过程信息。")

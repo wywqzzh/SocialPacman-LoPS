@@ -135,22 +135,23 @@ def compare_strategy_sequence_directory(output_dir: Path, baseline_dir: Path) ->
 
 def validate_human_fmri_outputs(
     ghost2_discrete_dir: Path,
-    ghost4_discrete_dir: Path,
     formed_ghost2_dir: Path,
     strategy_sequence_dir: Path,
     baseline_root: Path,
     report_path: Path,
 ) -> dict[str, Any]:
-    """验证完整 human fMRI 数据预处理各阶段输出是否与 baseline 一致。"""
+    """验证完整 human fMRI 数据预处理各阶段输出是否与 baseline 一致。
+
+    输入语义：当前主流程只保留 two-ghost 数据，因此只比较 ghost2 离散特征、
+    formed 数据和最终 strategy sequence。
+    输出语义：写出 JSON 报告并返回同一报告对象。
+    关键约束：这里不再检查四鬼目录，避免验证逻辑重新引入四鬼分支。
+    """
 
     stage_reports = {
         "fmri_discrete_feature_data_ghost2": compare_dataframe_directory(
             ghost2_discrete_dir,
             baseline_root / "fmri_discrete_feature_data_ghost2",
-        ),
-        "fmri_discrete_feature_data_ghost4": compare_dataframe_directory(
-            ghost4_discrete_dir,
-            baseline_root / "fmri_discrete_feature_data_ghost4",
         ),
         "fmri_formed_data_ghost2": compare_dataframe_directory(
             formed_ghost2_dir,
@@ -182,12 +183,6 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=data_root / "fmri_discrete_feature_data_ghost2",
         help="待验证的 ghost2 离散特征数据目录。",
-    )
-    parser.add_argument(
-        "--ghost4-discrete-dir",
-        type=Path,
-        default=data_root / "fmri_discrete_feature_data_ghost4",
-        help="待验证的 ghost4 离散特征数据目录。",
     )
     parser.add_argument(
         "--formed-ghost2-dir",
@@ -222,7 +217,6 @@ def main() -> None:
     args = parse_args()
     report = validate_human_fmri_outputs(
         ghost2_discrete_dir=args.ghost2_discrete_dir,
-        ghost4_discrete_dir=args.ghost4_discrete_dir,
         formed_ghost2_dir=args.formed_ghost2_dir,
         strategy_sequence_dir=args.strategy_sequence_dir,
         baseline_root=args.baseline_root,

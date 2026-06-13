@@ -41,13 +41,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input-dir",
         type=Path,
-        default=PROJECT_ROOT / "data/human_fmri_data_preprocess/strategy_sequence",
+        default=PROJECT_ROOT / "pipeline_data/human_fmri_data_preprocess/strategy_sequence",
         help="human_fmri_data_preprocess 生成的 strategy_sequence 输入目录。",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=PROJECT_ROOT / "data/state_dependency_graph/state_dependency_graph_data",
+        default=PROJECT_ROOT / "pipeline_data/state_dependency_graph/state_dependency_graph_data",
         help="状态依赖图输出目录。",
     )
     parser.add_argument(

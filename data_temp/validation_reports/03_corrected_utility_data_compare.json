@@ -1,9 +1,0 @@
-{
-  "current_dir": "pipeline_data/correct_utility_human/corrected_utility_data",
-  "legacy_dir": "data_temp/correct_utility_human/corrected_utility_data",
-  "current_files": 34,
-  "legacy_files": 34,
-  "checked_files": 34,
-  "failed_files": [],
-  "is_exact_semantic_match": true
-}

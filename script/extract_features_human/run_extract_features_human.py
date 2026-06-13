@@ -17,33 +17,24 @@ import pandas as pd
 INF_VALUE = 100
 DIRECTION_NAMES = ["left", "right", "up", "down"]
 DISCRETE_OUTPUT_COLUMNS = [
-    "PG",
     "PG1",
     "PG2",
-    "PG3",
-    "PG4",
     "PE",
-    "BN5",
-    "BN10",
-    "IS",
-    "IS_EXIST1",
+    "BW10",
+    "BB10",
     "IS1",
-    "IS_EXIST2",
     "IS2",
-    "IS_EXIST3",
-    "IS3",
-    "IS_EXIST4",
-    "IS4",
 ]
 FEATURE_APPEND_COLUMNS = [
-    "revise_weight",
-    "contribution",
+    "revised_normalized_weight",
+    "normalized_weight",
     "weight",
-    "file",
-    "level_0",
+    "row_id",
     "strategy",
     "DayTrial",
-    "Unnamed: 0",
+    "frame_id",
+    "game_id",
+    "action_dir",
 ]
 
 
@@ -274,7 +265,8 @@ def count_beans_by_distance(
     输入语义：trial 包含 `pacmanPos` 和 `beans`；beyond_threshold 为 False
     时统计距离小于 10 的 beans，为 True 时统计距离大于 10 的 beans。
     输出语义：返回每一行对应的 beans 数量 Series。
-    关键约束：旧变量名叫 `beans_within_5`，但实际阈值是 10；这里保留旧语义。
+    关键约束：旧变量名叫 `beans_within_5`，但实际阈值是 10；新输出改名为
+    `beans_within_10`，让字段名和含义一致。
     """
 
     def count_one(row: pd.Series) -> int:
@@ -301,7 +293,7 @@ def extract_feature(
     """提取旧流程中的连续人类行为特征。
 
     输入语义：trial 是一个被试的 CorrectedWeightData 表，地图常量由调用方传入。
-    输出语义：返回 15 个基础特征列组成的 DataFrame，后续会补充权重和索引字段。
+    输出语义：返回 two-ghost 基础特征列组成的 DataFrame，后续会补充权重和索引字段。
     关键约束：所有空列表、距离阈值和 `EE` 判定都按旧脚本执行。
     """
 
@@ -311,8 +303,6 @@ def extract_feature(
 
     pg1 = compute_target_distance(trial, "pacmanPos", "ghost1Pos", adjacent_data, locs_df)
     pg2 = compute_target_distance(trial, "pacmanPos", "ghost2Pos", adjacent_data, locs_df)
-    pg3 = compute_target_distance(trial, "pacmanPos", "ghost3Pos", adjacent_data, locs_df)
-    pg4 = compute_target_distance(trial, "pacmanPos", "ghost4Pos", adjacent_data, locs_df)
     pe = compute_target_distance(trial, "pacmanPos", "energizers", adjacent_data, locs_df)
 
     beans_10step = count_beans_by_distance(trial, locs_df, beyond_threshold=False)
@@ -320,21 +310,15 @@ def extract_feature(
 
     return pd.DataFrame(
         data={
-            "file": trial.DayTrial,
             "ifscared1": trial.ifscared1,
             "ifscared2": trial.ifscared2,
-            "ifscared3": trial.ifscared3,
-            "ifscared4": trial.ifscared4,
             "PG1": pg1,
             "PG2": pg2,
-            "PG3": pg3,
-            "PG4": pg4,
             "PE": pe,
-            "beans_within_5": beans_10step,
+            "beans_within_10": beans_10step,
             "beans_beyond_10": beans_over_10step,
             "EE": eat_energizer,
             "weight": trial["weight"],
-            "true_dir": trial.pacman_dir,
         }
     )
 
@@ -344,25 +328,19 @@ def combine_evade(predictors: pd.DataFrame, feature_data: pd.DataFrame) -> pd.Da
 
     输入语义：predictors 包含每个 ghost 的离散 PG/IS 编码，feature_data 包含原始距离。
     输出语义：返回增加 `PG` 和 `IS` 两列后的 predictors。
-    关键约束：最近 ghost 由原始 PG1-PG4 的最小值决定，平局时沿用 numpy.argmin 的首个最小值。
+    关键约束：最近 ghost 由原始 PG1/PG2 的最小值决定，平局时沿用 numpy.argmin 的首个最小值。
     """
 
     combined_pg = []
     combined_is = []
     for index in range(len(feature_data)):
-        nearest_ghost_index = np.argmin(np.array(feature_data[["PG1", "PG2", "PG3", "PG4"]].iloc[index]))
+        nearest_ghost_index = np.argmin(np.array(feature_data[["PG1", "PG2"]].iloc[index]))
         if nearest_ghost_index == 0:
             combined_pg.append(predictors["PG1"].iloc[index])
             combined_is.append(predictors["IS1"].iloc[index])
         elif nearest_ghost_index == 1:
             combined_pg.append(predictors["PG2"].iloc[index])
             combined_is.append(predictors["IS2"].iloc[index])
-        elif nearest_ghost_index == 2:
-            combined_pg.append(predictors["PG3"].iloc[index])
-            combined_is.append(predictors["IS3"].iloc[index])
-        elif nearest_ghost_index == 3:
-            combined_pg.append(predictors["PG4"].iloc[index])
-            combined_is.append(predictors["IS4"].iloc[index])
 
     predictors["PG"] = np.array(combined_pg, dtype=int)
     predictors["IS"] = np.array(combined_is, dtype=int)
@@ -373,7 +351,7 @@ def predictor_for_prediction(feature_data: pd.DataFrame) -> pd.DataFrame:
     """把连续特征离散化为 grammar 上游使用的 predictor 表。
 
     输入语义：feature_data 是 extract_feature 输出并已补齐旧权重字段的数据。
-    输出语义：返回旧 `DiscreteFeatureData` 的 17 个离散特征列。
+    输出语义：返回 two-ghost `DiscreteFeatureData` 的离散特征列。
     关键约束：ghost 死亡态、距离分箱和 beans 二值化都按旧脚本逐步执行。
     """
 
@@ -382,10 +360,8 @@ def predictor_for_prediction(feature_data: pd.DataFrame) -> pd.DataFrame:
     # 死亡 ghost 的距离被固定为 100，再参与 0/1 距离分箱。
     df.loc[df.ifscared1 == 3, "PG1"] = 100
     df.loc[df.ifscared2 == 3, "PG2"] = 100
-    df.loc[df.ifscared3 == 3, "PG3"] = 100
-    df.loc[df.ifscared4 == 3, "PG4"] = 100
 
-    for ghost_index in [1, 2, 3, 4]:
+    for ghost_index in [1, 2]:
         scared_column = f"ifscared{ghost_index}"
         df[f"if_exist{ghost_index}"] = (df[scared_column] != -1).astype(int)
         df[f"if_normal{ghost_index}"] = (df[scared_column] <= 2).astype(int)
@@ -393,12 +369,12 @@ def predictor_for_prediction(feature_data: pd.DataFrame) -> pd.DataFrame:
         df[f"if_scared{ghost_index}"] = (df[scared_column] >= 4).astype(int)
 
     is_encode = pd.DataFrame()
-    for ghost_index in [1, 2, 3, 4]:
+    for ghost_index in [1, 2]:
         status_columns = [f"if_{status}{ghost_index}" for status in ["normal", "dead", "scared"]]
         is_encode[f"IS_EXIST{ghost_index}"] = df[f"if_exist{ghost_index}"]
         is_encode[f"IS{ghost_index}"] = np.argmax(df[status_columns].values, 1)
 
-    numerical_columns = ["PG1", "PG2", "PG3", "PG4", "PE"]
+    numerical_columns = ["PG1", "PG2", "PE"]
     distance_bins = [0, 11, 101]
     numerical_encode1 = pd.concat(
         [pd.cut(df[column], distance_bins, right=False, labels=[0, 1]) for column in numerical_columns],
@@ -408,10 +384,10 @@ def predictor_for_prediction(feature_data: pd.DataFrame) -> pd.DataFrame:
 
     numerical_encode2 = pd.DataFrame()
     # 旧脚本先做归一化，再只检查是否为 0；这个步骤不影响二值结果，但保留以保证流程一致。
-    df["beans_within_5"] = np.array(df["beans_within_5"]) / np.max(df["beans_within_5"])
+    df["beans_within_10"] = np.array(df["beans_within_10"]) / np.max(df["beans_within_10"])
     df["beans_beyond_10"] = np.array(df["beans_beyond_10"]) / np.max(df["beans_beyond_10"])
-    numerical_encode2["BN5"] = 1 - np.array(df["beans_within_5"] == 0, dtype=int)
-    numerical_encode2["BN10"] = 1 - np.array(df["beans_beyond_10"] == 0, dtype=int)
+    numerical_encode2["BW10"] = 1 - np.array(df["beans_within_10"] == 0, dtype=int)
+    numerical_encode2["BB10"] = 1 - np.array(df["beans_beyond_10"] == 0, dtype=int)
 
     predictors = pd.concat([numerical_encode1, numerical_encode2, is_encode], axis=1)
     predictors = combine_evade(predictors, df)
@@ -433,11 +409,11 @@ def output_file_name(input_path: Path) -> str:
 
 
 def append_legacy_columns(features: pd.DataFrame, source_data: pd.DataFrame) -> pd.DataFrame:
-    """向连续特征表补齐旧脚本保存的权重、贡献和索引字段。
+    """向连续特征表补齐后续流程需要的标准分析字段。
 
     输入语义：features 是基础连续特征表，source_data 是原始 CorrectedWeightData。
-    输出语义：返回列顺序与旧 `FeatureData` 一致的 DataFrame。
-    关键约束：`file` 和 `weight` 是已存在列，重新赋值不会改变列位置。
+    输出语义：返回带权重、策略、行号、trial id 和动作字段的 DataFrame。
+    关键约束：`weight` 是已存在列，重新赋值不会改变列位置。
     """
 
     for column_name in FEATURE_APPEND_COLUMNS:
@@ -451,14 +427,13 @@ def append_discrete_legacy_columns(
     features: pd.DataFrame,
     source_data: pd.DataFrame,
 ) -> pd.DataFrame:
-    """向离散 predictor 表补齐旧脚本保存的附加字段。
+    """向离散 predictor 表补齐后续 fMRI 流程需要的标准字段。
 
-    输入语义：predictors 是 17 列离散特征，features 提供 `EE`，source_data 提供旧附加字段。
-    输出语义：返回列顺序与旧 `DiscreteFeatureData` 一致的 DataFrame。
-    关键约束：不添加 `game`，该列属于后续分流流程。
+    输入语义：predictors 是离散状态特征，source_data 提供权重、策略和 trial id。
+    输出语义：返回可直接进入 human_fmri_data_preprocess 的 DataFrame。
+    关键约束：`EE`、合并 PG/IS 和 ghost 存在标记不再进入离散主链路。
     """
 
-    predictors["EE"] = np.array(features["EE"])
     for column_name in FEATURE_APPEND_COLUMNS:
         predictors[column_name] = np.array(source_data[column_name])
     return predictors
@@ -545,31 +520,31 @@ def parse_args() -> argparse.Namespace:
     关键约束：默认目录全部位于 LoPS 仓库内，不依赖旧项目路径。
     """
 
-    data_root = project_root() / "data" / "extract_features_human"
+    data_root = project_root() / "pipeline_data"
     default_processes = min(34, os.cpu_count() or 1)
     parser = argparse.ArgumentParser(description="提取人类 CorrectedWeightData 的连续特征和离散特征。")
     parser.add_argument(
         "--input-dir",
         type=Path,
-        default=data_root / "input" / "corrected_weight_data",
+        default=data_root / "revise_human_weight" / "corrected_weight_data",
         help="扁平 CorrectedWeightData 输入目录。",
     )
     parser.add_argument(
         "--constant-dir",
         type=Path,
-        default=data_root / "input" / "constant_data",
+        default=data_root / "constant_data",
         help="包含 fMRI 邻接表和距离表的常量目录。",
     )
     parser.add_argument(
         "--feature-output-dir",
         type=Path,
-        default=data_root / "feature_data",
+        default=data_root / "extract_features_human" / "feature_data",
         help="连续特征输出目录。",
     )
     parser.add_argument(
         "--discrete-output-dir",
         type=Path,
-        default=data_root / "discrete_feature_data",
+        default=data_root / "extract_features_human" / "discrete_feature_data",
         help="离散特征输出目录。",
     )
     parser.add_argument(
@@ -603,4 +578,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

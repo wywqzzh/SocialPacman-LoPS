@@ -13,7 +13,7 @@ import pandas as pd
 
 DIRECTIONS: tuple[str, str, str, str] = ("left", "right", "up", "down")
 DIRECTION_TO_INDEX = {direction: index for index, direction in enumerate(DIRECTIONS)}
-GHOST_NAMES: tuple[str, str, str, str] = ("blinky", "clyde", "ghost3", "ghost4")
+GHOST_NAMES: tuple[str, str] = ("blinky", "clyde")
 PACMAN_TUNNEL_FIXES = {
     (0, 18): (1, 18),
     (-1, 18): (1, 18),
@@ -95,7 +95,7 @@ class FrameState:
 
     输入语义：由 corrected tile DataFrame 的一行解析得到。
     输出语义：每个策略只读取该结构，不再直接处理 DataFrame 字段或字符串字面量。
-    关键约束：ghost3/ghost4 不存在时用空 tuple 表达，保留旧实现中 ``tuple([])`` 的语义。
+    关键约束：当前主流程只分析 two-ghost 数据，因此只保存 blinky/clyde 两只 ghost。
     """
 
     pacman_position: tuple[int, int]
@@ -118,7 +118,7 @@ class CompiledFrameState:
     pacman_id: int
     bean_mask: int
     energizer_mask: int
-    ghost_ids: tuple[int, int, int, int]
+    ghost_ids: tuple[int, ...]
     ghost_status: tuple[Any, ...]
     last_direction_id: int | None
 
@@ -222,15 +222,20 @@ def parse_frame_state(row: pd.Series, columns: pd.Index | list[str] | tuple[str,
     beans = _parse_position_list(row["beans"])
     ghost_positions = [
         _normalize_ghost_position(_parse_optional_ghost_position(row[f"ghost{index}Pos"]))
-        for index in range(1, 5)
+        for index in range(1, 3)
     ]
 
     if "ghost1_status" in column_set or "ghost2_status" in column_set:
         ghost_status = [row["ghost1_status"], row["ghost2_status"]]
     else:
-        ghost_status = [row[f"ifscared{index}"] for index in range(1, 5)]
+        ghost_status = [row[f"ifscared{index}"] for index in range(1, 3)]
 
-    last_direction = None if pd.isna(row["pacman_dir"]) else row["pacman_dir"]
+    # 新标准分析流删除了 arrive direction（旧 pacman_dir）。该字段只在非零 laziness
+    # 系数下影响 Q；当前 fMRI utility 默认 laziness 为 0，因此缺失时保持 None。
+    if "pacman_dir" in column_set and not pd.isna(row["pacman_dir"]):
+        last_direction = row["pacman_dir"]
+    else:
+        last_direction = None
     return FrameState(
         pacman_position=pacman_position,
         energizers=energizers,

@@ -188,7 +188,7 @@ def _convert_one_worker(task: tuple[str, str, str, bool]) -> dict[str, object]:
     if write_csv:
         csv_path = csv_output_dir / f"{subject}.csv"
         # 旧 toPkl.py 使用 dataFrame.to_csv(path)，默认保留 index；
-        # 这里也保持相同写法，便于复现旧 CSV 的 Unnamed: 0 行为。
+        # 这里也保持相同写法，便于人工排查 CSV 时看到导出行号。
         frame_data.to_csv(csv_path)
 
     return {
@@ -234,8 +234,8 @@ def convert_raw_subject_data_to_frame_data(df: pd.DataFrame) -> pd.DataFrame:
     # 当前完整流程只保留 two-ghost trial。four-ghost trial 会在后续 fMRI utility
     # 中进入地图常量未覆盖的位置，因此在 frame_data 生成阶段按整局直接过滤。
     grouped_first = _filter_two_ghost_trials(grouped_first)
-    # frame data 是后续 tile 抽样和 frameIndex 回指的基础表，必须先按 trial 数字编号
-    # 和帧号稳定排序，再生成 Unnamed: 0，避免字符串排序把 10-1 排在 2-1 前面。
+    # frame data 是后续 tile 抽样和行级回指的基础表，必须先按 trial 数字编号
+    # 和帧号稳定排序，再生成 frame_id，避免字符串排序把 10-1 排在 2-1 前面。
     grouped_first = _sort_grouped_frame_by_daytrial_step(grouped_first)
 
     # 这里构造的是旧 ``ppRaw.transData`` 的核心字段：
@@ -278,9 +278,9 @@ def convert_raw_subject_data_to_frame_data(df: pd.DataFrame) -> pd.DataFrame:
     # 旧 fmriFrameData 使用 0-based Step；逐帧原始 PKL 保留 MATLAB/Data 表的
     # 1-based Step。frame table 层转换时统一改成 0-based，便于和旧分析结果对齐。
     data_frame["Step"] = data_frame["Step"] - 1
-    # 旧式 frame_data 中 Unnamed: 0 表示排序后逐帧表的行号；corrected tile 阶段会把
-    # 它复制为 frameIndex，用于从 tile 抽样点回到原始 frame 区间补中间格。
-    data_frame.insert(0, "Unnamed: 0", np.arange(len(data_frame), dtype=np.int64))
+    # frame_id 表示排序后逐帧表的稳定行号；后续 tile/corrected tile 阶段会直接
+    # 使用它回到原始 frame 区间补中间格，不再生成 Unnamed: 0 或 frameIndex。
+    data_frame.insert(0, "frame_id", np.arange(len(data_frame), dtype=np.int64))
     return data_frame
 
 

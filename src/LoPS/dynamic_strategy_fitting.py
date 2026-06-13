@@ -11,7 +11,7 @@ import copy
 import multiprocessing
 import pickle
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -25,18 +25,27 @@ DEFAULT_AGENTS: tuple[str, ...] = (
     "local",
     "evade_blinky",
     "evade_clyde",
-    "evade_ghost3",
-    "evade_ghost4",
     "approach",
     "energizer",
     "no_energizer",
 )
+INTERNAL_COMPATIBILITY_AGENTS: tuple[str, ...] = (
+    "global",
+    "local",
+    "evade_blinky",
+    "evade_clyde",
+    "_compat_padding_agent_1",
+    "_compat_padding_agent_2",
+    "approach",
+    "energizer",
+    "no_energizer",
+)
+OUTPUT_AGENT_INDICES: tuple[int, ...] = (0, 1, 2, 3, 6, 7, 8)
+COMPATIBILITY_PADDING_AGENTS: tuple[str, ...] = ("_compat_padding_agent_1", "_compat_padding_agent_2")
 PARSED_POSITION_COLUMNS: tuple[str, ...] = (
     "pacmanPos",
     "ghost1Pos",
     "ghost2Pos",
-    "ghost3Pos",
-    "ghost4Pos",
     "beans",
     "energizers",
 )
@@ -203,7 +212,7 @@ def prepare_fitting_dataframe(
         if column in data.columns:
             data[column] = data[column].apply(parse_literal_if_needed)
 
-    required_columns = ["file", "game", "next_pacman_dir_fill"]
+    required_columns = ["row_id", "DayTrial", "game_id", "action_dir", "available_dir"]
     required_columns.extend(f"{agent}_Q_norm" for agent in config.agents)
     missing_columns = [column for column in required_columns if column not in data.columns]
     if missing_columns:
@@ -212,9 +221,65 @@ def prepare_fitting_dataframe(
             f"{missing_columns}。请先运行 script/calculate_utility/run_calculate_utility.py。"
         )
 
-    # 上游阶段已经按 game 生成下一步动作；这里仅把 None 规整成 NaN，便于后续合法性判断。
-    data["next_pacman_dir_fill"] = data.next_pacman_dir_fill.apply(lambda value: value if value is not None else np.nan)
+    # 上游阶段已经生成 action_dir/available_dir；这里仅规范缺失值和 dtype。
+    data["action_dir"] = data.action_dir.apply(lambda value: value if value is not None else np.nan)
+    data["available_dir"] = data.available_dir.astype(bool)
+    data["row_id"] = pd.to_numeric(data["row_id"], errors="raise").astype("int64")
     return data
+
+
+def build_internal_fitting_view(
+    data: pd.DataFrame,
+    config: DynamicStrategyFittingConfig,
+    suffix: str,
+) -> tuple[pd.DataFrame, DynamicStrategyFittingConfig, tuple[int, ...], list[str]]:
+    """为动态拟合构造内部工作表，并返回输出向量投影方式。
+
+    输入语义：data 是正式 two-ghost utility 表，config.agents 是对外可见的 7 个 agent。
+    输出语义：默认返回带两个临时占位 Q 列的工作表、9 维内部配置、7 维输出索引和临时列名。
+    关键约束：临时占位列只用于复现旧 9 维随机优化路径，函数返回前必须从结果表删除。
+    """
+
+    # 若调用方显式传入了非默认 agent 列表，则尊重调用方配置，不做旧维度兼容投影。
+    if tuple(config.agents) != DEFAULT_AGENTS:
+        return data.copy(deep=True), config, tuple(range(len(config.agents))), []
+
+    fit_data = data.copy(deep=True)
+    reference_column = f"{DEFAULT_AGENTS[0]}{suffix}"
+    temporary_columns: list[str] = []
+
+    def padding_q_values(reference_q: Any) -> np.ndarray:
+        """根据 global Q 的合法方向形状构造内部兼容占位 Q。
+
+        输入语义：reference_q 是当前行 global 策略的四方向归一化 Q。
+        输出语义：返回同形状数组，可行动作方向为 0，不可行动作保留原始无效值。
+        关键约束：该数组只用于稳定旧 9 维优化路径，不进入正式输出字段。
+        """
+
+        values = np.asarray(reference_q, dtype=float)
+        # 已删除的两个策略位置在旧 two-ghost 数据里没有有效 utility；
+        # 这里仅复现它们对随机优化搜索空间维度的影响。
+        return np.where(np.isfinite(values), 0.0, values)
+
+    for agent in COMPATIBILITY_PADDING_AGENTS:
+        column = f"{agent}{suffix}"
+        fit_data[column] = fit_data[reference_column].apply(padding_q_values)
+        temporary_columns.append(column)
+
+    internal_config = replace(config, agents=INTERNAL_COMPATIBILITY_AGENTS)
+    return fit_data, internal_config, OUTPUT_AGENT_INDICES, temporary_columns
+
+
+def project_agent_vector(values: Any, output_indices: tuple[int, ...]) -> np.ndarray:
+    """把内部 agent 向量投影到正式输出使用的 two-ghost agent 顺序。
+
+    输入语义：values 是内部拟合得到的权重或贡献向量。
+    输出语义：返回只包含正式 7 个 agent 的 NumPy 数组。
+    关键约束：投影只删除内部兼容占位位置，不改变剩余 agent 的相对顺序。
+    """
+
+    array = np.asarray(values, dtype=float)
+    return array[list(output_indices)]
 
 
 def all_directions_nan(
@@ -232,11 +297,7 @@ def all_directions_nan(
     start, end = context
     segment = data.iloc[start:end]
     temp_data = copy.deepcopy(segment)
-    temp_data["nan_dir"] = temp_data.next_pacman_dir_fill.apply(lambda value: isinstance(value, float))
-    temp_data["available_dir"] = temp_data[["pacmanPos", "next_pacman_dir_fill"]].apply(
-        lambda row: is_available_direction(row.pacmanPos, row.next_pacman_dir_fill, adjacent_map),
-        axis=1,
-    )
+    temp_data["nan_dir"] = temp_data.action_dir.apply(lambda value: isinstance(value, float))
     valid_data = segment[(temp_data.nan_dir == False) & (temp_data.available_dir == True)]
     return valid_data.shape[0] == 0
 
@@ -244,7 +305,7 @@ def all_directions_nan(
 def change_direction_indices(directions: pd.Series) -> np.ndarray | list[int]:
     """找出 Pacman 方向发生变化的位置。
 
-    输入语义：directions 是一个 trial 内的 ``next_pacman_dir_fill`` 序列。
+    输入语义：directions 是一个 trial 内的 ``action_dir`` 序列。
     输出语义：返回切点列表，最后一个切点总是 trial 长度。
     关键约束：连续相邻变化只保留间隔大于 1 的位置，保留旧切点定义。
     """
@@ -303,8 +364,6 @@ def add_event_cutoff_points(cutoff_points: np.ndarray | list[int], trial_data: p
         (
             ((trial_data.ifscared1 == 3) & (trial_data.ifscared1.diff() < 0))
             | ((trial_data.ifscared2 == 3) & (trial_data.ifscared2.diff() < 0))
-            | ((trial_data.ifscared3 == 3) & (trial_data.ifscared3.diff() < 0))
-            | ((trial_data.ifscared4 == 3) & (trial_data.ifscared4.diff() < 0))
         )
         .where(lambda value: value == True)
         .dropna()
@@ -323,7 +382,7 @@ def add_event_cutoff_points(cutoff_points: np.ndarray | list[int], trial_data: p
     merged_cutoffs.sort()
 
     # 长连续 NaN 方向段不能被普通方向切点切开，否则后续 stay 标记会错位。
-    temp_direction_flags = [0 if isinstance(value, float) else 1 for value in trial_data.next_pacman_dir_fill]
+    temp_direction_flags = [0 if isinstance(value, float) else 1 for value in trial_data.action_dir]
     nan_indices = np.where(np.array(temp_direction_flags) == 0)[0]
     nan_contexts: list[tuple[int, int]] = []
     if len(nan_indices) > 0:
@@ -560,7 +619,7 @@ def build_context_segments(
 
     输入语义：prepared_data 是 prepare_fitting_dataframe 后的数据。
     输出语义：返回全局坐标段落、stay 标记、吃 energizer 行号和吃 ghost 行号。
-    关键约束：每个 trial 内先独立切段，再用 ``level_0`` 映射回完整 DataFrame 行号。
+    关键约束：每个 trial 内先独立切段，再用 ``row_id`` 映射回完整 DataFrame 行号。
     """
 
     config = DynamicStrategyFittingConfig() if config is None else config
@@ -569,22 +628,22 @@ def build_context_segments(
     all_eat_energizers: list[int] = []
     all_eat_ghost: list[int] = []
 
-    for trial_index, trial_name in enumerate(np.unique(prepared_data.file.values)):
-        trial_data = prepared_data[prepared_data.file == trial_name]
+    for trial_index, trial_name in enumerate(np.unique(prepared_data.DayTrial.values)):
+        trial_data = prepared_data[prepared_data.DayTrial == trial_name]
         trial_data.reset_index(drop=True, inplace=True)
         print(f"| ({trial_index}) {trial_name} | Data shape {trial_data.shape}")
 
         cutoffs, eat_energizers, eat_ghost = add_event_cutoff_points(
-            change_direction_indices(trial_data.next_pacman_dir_fill),
+            change_direction_indices(trial_data.action_dir),
             trial_data,
             config.stay_length,
         )
-        level_offset = trial_data["level_0"].iloc[0]
+        level_offset = int(trial_data["row_id"].iloc[0])
         all_eat_energizers += [eat_index + level_offset for eat_index in eat_energizers]
         all_eat_ghost += [eat_index + level_offset for eat_index in eat_ghost]
 
         contexts = list(zip([0] + list(cutoffs[:-1]), cutoffs))
-        events, is_nan = label_context_events(trial_data.next_pacman_dir_fill, contexts, eat_energizers, eat_ghost)
+        events, is_nan = label_context_events(trial_data.action_dir, contexts, eat_energizers, eat_ghost)
         contexts, is_nan = merge_short_contexts(contexts, events, trial_data, adjacent_map, config.stay_length)
         global_contexts = [(context[0] + level_offset, context[1] + level_offset) for context in contexts]
         all_is_nan += is_nan
@@ -731,18 +790,14 @@ def fit_one_segment(
 
     segment = data[start:end]
     temp_data = copy.deepcopy(segment)
-    temp_data["nan_dir"] = temp_data.next_pacman_dir_fill.apply(lambda value: isinstance(value, float))
-    temp_data["available_dir"] = temp_data[["pacmanPos", "next_pacman_dir_fill"]].apply(
-        lambda row: is_available_direction(row.pacmanPos, row.next_pacman_dir_fill, adjacent_map),
-        axis=1,
-    )
+    temp_data["nan_dir"] = temp_data.action_dir.apply(lambda value: isinstance(value, float))
     valid_data = segment[(temp_data.nan_dir == False) & (temp_data.available_dir == True)]
     if valid_data.shape[0] == 0:
         print(f"All the directions are nan from {start} to {end}!")
         return None
 
     valid_indices = np.where((temp_data.nan_dir == False) & (temp_data.available_dir == True))[0] + start
-    true_prob = valid_data.next_pacman_dir_fill.ffill().apply(one_hot_direction)
+    true_prob = valid_data.action_dir.ffill().apply(one_hot_direction)
     true_direction = true_prob.apply(choose_max_direction).values
     sample_count = valid_data.shape[0]
     agent_q_values = build_agent_q_values(valid_data, config.agents, suffix)
@@ -973,7 +1028,7 @@ def fit_dynamic_strategy_dataframe(
     """对单个被试 DataFrame 执行完整动态策略拟合。
 
     输入语义：raw_data 是 calculate_utility 输出表；adjacent_map 是 fMRI 邻接表。
-    输出语义：返回追加 weight/contribution/is_correct 等列的 WeightData 表。
+    输出语义：返回追加 weight/normalized_weight/prediction_correct 等列的 WeightData 表。
     关键约束：拟合所有上下文段落；随机过程由 config.random_seed 控制。
     """
 
@@ -985,73 +1040,67 @@ def fit_dynamic_strategy_dataframe(
     print("Start reading data...")
     data = prepare_fitting_dataframe(raw_data, adjacent_map, config)
     suffix = "_Q_norm"
+    fit_data, fit_config, output_agent_indices, temporary_q_columns = build_internal_fitting_view(data, config, suffix)
     print("Finished reading trial data.")
-    trial_names = np.unique(data.file.values)
+    trial_names = np.unique(fit_data.DayTrial.values)
     print("The num of trials : ", len(trial_names))
     print("-" * 50)
 
-    data["available_dir"] = data[["pacmanPos", "next_pacman_dir_fill"]].apply(
-        lambda row: is_available_direction(row.pacmanPos, row.next_pacman_dir_fill, adjacent_map),
-        axis=1,
-    )
-    invalid_direction_indices = np.where(data["available_dir"] == False)[0]
-    data.loc[data.index[invalid_direction_indices], "next_pacman_dir_fill"] = [np.nan] * len(invalid_direction_indices)
+    # 拟合切段需要把非法动作当作 NaN 处理，但正式输出仍保留上游 action_dir 原值。
+    original_action_dir = fit_data["action_dir"].copy(deep=True)
+    invalid_direction_indices = np.where(fit_data["available_dir"] == False)[0]
+    fit_data.loc[fit_data.index[invalid_direction_indices], "action_dir"] = [np.nan] * len(invalid_direction_indices)
 
-    # 旧输出依赖 level_0/index 两列；这里按旧条件创建。
-    if "index" not in data.columns.values:
-        data = data.reset_index(drop=False)
-        data = data.reset_index(drop=False)
-    elif "level_0" not in data.columns.values:
-        data = data.reset_index(drop=False)
-
-    contexts, is_nan, eat_energizers, eat_ghost = build_context_segments(data, adjacent_map, config)
+    contexts, is_nan, eat_energizers, eat_ghost = build_context_segments(fit_data, adjacent_map, fit_config)
     result_list, _, is_correct, predicted_direction, is_vague = fit_all_segments(
-        data,
+        fit_data,
         contexts,
         is_nan,
         adjacent_map,
-        config,
+        fit_config,
         suffix=suffix,
     )
 
     trial_weight: list[Any] = []
     trial_context: list[tuple[int, int]] = []
-    trial_contribution: list[Any] = []
+    trial_normalized_weight: list[Any] = []
     trial_is_stay: list[bool] = []
     for result_index, result in enumerate(result_list):
-        weight = result[: len(config.agents)]
+        internal_weight = np.asarray(result[: len(fit_config.agents)], dtype=float)
+        output_weight = project_agent_vector(internal_weight, output_agent_indices).tolist()
         start = result[-2]
         end = result[-1]
         for _ in range(start, end):
             trial_context.append((start, end))
-            trial_weight.append(weight)
+            trial_weight.append(output_weight)
             trial_is_stay.append(is_nan[result_index])
-            if is_nan[result_index] is False and np.sum(weight) != 0:
-                contribution = (weight - np.min(weight)) / (np.max(weight) - np.min(weight))
-                trial_contribution.append(contribution)
+            if is_nan[result_index] is False and np.sum(internal_weight) != 0:
+                normalized_weight = (internal_weight - np.min(internal_weight)) / (np.max(internal_weight) - np.min(internal_weight))
+                trial_normalized_weight.append(project_agent_vector(normalized_weight, output_agent_indices))
             else:
-                trial_contribution.append(copy.deepcopy(weight))
+                trial_normalized_weight.append(copy.deepcopy(output_weight))
 
-    if len(trial_weight) != data.shape[0]:
-        data["weight"] = [np.nan for _ in range(data.shape[0])]
-        data["contribution"] = [np.nan for _ in range(data.shape[0])]
-        data["is_correct"] = [np.nan for _ in range(data.shape[0])]
+    if len(trial_weight) != fit_data.shape[0]:
+        fit_data["weight"] = [np.nan for _ in range(fit_data.shape[0])]
+        fit_data["normalized_weight"] = [np.nan for _ in range(fit_data.shape[0])]
+        fit_data["prediction_correct"] = [np.nan for _ in range(fit_data.shape[0])]
     elif len(trial_weight) > 0:
-        data["weight"] = trial_weight
-        data["contribution"] = trial_contribution
-        data["is_correct"] = is_correct
-        data["predict_dir"] = predicted_direction
-        data["trial_context"] = trial_context
-        data["eat_energizer"] = [False] * len(data)
-        data.loc[data.index[eat_energizers], "eat_energizer"] = [True] * len(eat_energizers)
-        data["eat_ghost"] = [False] * len(data)
-        data.loc[data.index[eat_ghost], "eat_ghost"] = [True] * len(eat_ghost)
-        data["is_stay"] = trial_is_stay
-        data["is_vague"] = is_vague
-        print(np.sum(is_vague) / len(data))
+        fit_data["weight"] = trial_weight
+        fit_data["normalized_weight"] = trial_normalized_weight
+        fit_data["prediction_correct"] = is_correct
+        fit_data["predict_dir"] = predicted_direction
+        fit_data["trial_context"] = trial_context
+        fit_data["eat_energizer"] = [False] * len(fit_data)
+        fit_data.loc[fit_data.index[eat_energizers], "eat_energizer"] = [True] * len(eat_energizers)
+        fit_data["eat_ghost"] = [False] * len(fit_data)
+        fit_data.loc[fit_data.index[eat_ghost], "eat_ghost"] = [True] * len(eat_ghost)
+        fit_data["is_stay"] = trial_is_stay
+        fit_data["is_vague"] = is_vague
+        print(np.sum(is_vague) / len(fit_data))
 
+    fit_data["action_dir"] = original_action_dir.to_numpy()
     print("Finished fitting.")
-    return data
+    return fit_data.drop(columns=temporary_q_columns)
 
 
 def process_dynamic_strategy_file(

@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 # 当前 grammar 学习流程使用的状态特征列；列顺序会影响状态组合编码和得分结果。
-DEFAULT_STATE_NAMES = ("IS1", "IS2", "PG1", "PG2", "PE", "BN5")
+DEFAULT_STATE_NAMES = ("IS1", "IS2", "PG1", "PG2", "PE", "BW10")
 
 
 @dataclass(frozen=True)

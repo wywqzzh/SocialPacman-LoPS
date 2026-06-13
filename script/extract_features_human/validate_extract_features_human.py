@@ -220,7 +220,8 @@ def copy_discrete_input(source_dir: Path, target_dir: Path) -> None:
 
     输入语义：source_dir 是 extractor 输出目录，target_dir 是临时 raw-discrete 目录。
     输出语义：复制所有 `.pkl` 文件到 target_dir。
-    关键约束：后续 human_fmri_data_preprocess 会在该目录上执行 ghost2/ghost4 分流。
+    关键约束：后续 human_fmri_data_preprocess 会把这些 two-ghost 离散特征整理成
+    ghost2 formed 数据，不再生成四鬼分支。
     """
 
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -242,7 +243,6 @@ def run_current_chain(run_dir: Path, raw_discrete_dir: Path) -> Path:
     process_human_fmri_data(
         raw_discrete_dir=raw_discrete_dir,
         ghost2_discrete_dir=run_dir / "fmri_discrete_feature_data_ghost2",
-        ghost4_discrete_dir=run_dir / "fmri_discrete_feature_data_ghost4",
         formed_ghost2_dir=run_dir / "fmri_formed_data_ghost2",
         strategy_sequence_dir=sequence_dir,
     )

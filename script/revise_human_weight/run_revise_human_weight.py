@@ -22,8 +22,6 @@ STRATEGY_NUMBER = {
     "local": 1,
     "evade_blinky": 2,
     "evade_clyde": 3,
-    "evade_3": 4,
-    "evade_4": 5,
     "approach": 6,
     "energizer": 7,
     "no_energizer": 8,
@@ -35,16 +33,16 @@ AGENTS = [
     "local",
     "evade_blinky",
     "evade_clyde",
-    "evade_ghost3",
-    "evade_ghost4",
     "approach",
     "energizer",
     "no_energizer",
 ]
+AGENT_INDEX = {agent: index for index, agent in enumerate(AGENTS)}
+AGENT_INDEX_TO_STRATEGY_NUMBER = {index: STRATEGY_NUMBER[agent] for agent, index in AGENT_INDEX.items()}
 SUFFIX = "_Q_norm"
 AGENT_Q_COLUMNS = [f"{agent}{SUFFIX}" for agent in AGENTS]
 DIRECTION_NAMES = ["left", "right", "up", "down"]
-RANDOM_DIAGNOSTIC_COLUMNS = ["predict_dir", "revise_is_correct"]
+RANDOM_DIAGNOSTIC_COLUMNS = ["predict_dir", "revised_prediction_correct"]
 
 
 @dataclass
@@ -131,9 +129,9 @@ def strategy_from_weight(
 ) -> int:
     """根据权重向量和人工标记得到策略编号。
 
-    输入语义：weight 是 9 个 agent 权重，is_stay/is_vague 是旧流程标记。
+    输入语义：weight 是 7 个 agent 权重，is_stay/is_vague 是旧流程标记。
     输出语义：返回旧策略编号。
-    关键约束：并列最大值的优先级完全保留旧脚本语义。
+    关键约束：权重向量下标与旧策略编号不同，必须通过 AGENT_INDEX 显式映射。
     """
 
     if is_stay is True:
@@ -149,38 +147,38 @@ def strategy_from_weight(
         max_value = np.max(weight)
         max_indices = np.where(weight == max_value)[0]
         if len(max_indices) > 1:
-            if strategy_to_number["local"] in max_indices:
+            if AGENT_INDEX["local"] in max_indices:
                 return strategy_to_number["local"]
-            if strategy_to_number["global"] in max_indices:
+            if AGENT_INDEX["global"] in max_indices:
                 return strategy_to_number["global"]
             if (
-                strategy_to_number["global"] not in max_indices
-                and strategy_to_number["local"] not in max_indices
-                and strategy_to_number["energizer"] not in max_indices
-                and strategy_to_number["approach"] not in max_indices
-                and strategy_to_number["no_energizer"] not in max_indices
+                AGENT_INDEX["global"] not in max_indices
+                and AGENT_INDEX["local"] not in max_indices
+                and AGENT_INDEX["energizer"] not in max_indices
+                and AGENT_INDEX["approach"] not in max_indices
+                and AGENT_INDEX["no_energizer"] not in max_indices
             ):
-                return int(max_indices[0])
+                return AGENT_INDEX_TO_STRATEGY_NUMBER[int(max_indices[0])]
             return strategy_to_number["vague"]
-        return int(max_indices[0])
+        return AGENT_INDEX_TO_STRATEGY_NUMBER[int(max_indices[0])]
     except Exception:
         # 旧脚本只打印上下文后继续返回 index[0]；这里保留可定位的异常信息。
         print("=" * 120)
         print(file_name, trial_name)
-        return int(max_indices[0])
+        return AGENT_INDEX_TO_STRATEGY_NUMBER[int(max_indices[0])]
 
 
 def recompute_strategy(data: pd.DataFrame, file_name: str, trial_name: str) -> None:
-    """重新根据 revise_weight/is_stay/is_vague 写入 strategy 列。
+    """重新根据 revised_normalized_weight/is_stay/is_vague 写入 strategy 列。
 
     输入语义：data 是单个 trial 的工作表，file_name/trial_name 用于错误定位。
     输出语义：就地更新 data 的 `strategy` 列。
     关键约束：每个规则阶段后都按旧脚本重新计算 strategy。
     """
 
-    data["strategy"] = data[["revise_weight", "is_stay", "is_vague"]].apply(
+    data["strategy"] = data[["revised_normalized_weight", "is_stay", "is_vague"]].apply(
         lambda row: strategy_from_weight(
-            row.revise_weight,
+            row.revised_normalized_weight,
             row.is_stay,
             row.is_vague,
             STRATEGY_NUMBER,
@@ -201,14 +199,14 @@ def extract_context_data(data: pd.DataFrame, prev: int, end: int) -> ContextData
 
     segment = copy.deepcopy(data.loc[prev : end - 1])
     temp_data = copy.deepcopy(segment)
-    nan_dir = temp_data.next_pacman_dir_fill.apply(lambda value: isinstance(value, float))
+    nan_dir = temp_data.action_dir.apply(lambda value: isinstance(value, float))
     valid_data = segment[nan_dir == False]
     if valid_data.shape[0] == 0:
         return None
 
     valid_indices = np.where(nan_dir == False)[0] + prev
     nan_indices = np.where(nan_dir == True)[0] + prev
-    true_prob = valid_data.next_pacman_dir_fill.ffill().apply(one_hot_direction)
+    true_prob = valid_data.action_dir.ffill().apply(one_hot_direction)
     return ContextData(
         segment=segment,
         valid_data=valid_data,
@@ -269,8 +267,8 @@ def calculate_prediction_result(
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """计算一个修正权重在段落内的诊断预测结果。
 
-    输入语义：weight 是 9 维 agent 权重，context 是有效方向段落。
-    输出语义：返回 `is_correct`、`estimated_dir` 和按并列方向折算的 rate。
+    输入语义：weight 是 7 维 agent 权重，context 是有效方向段落。
+    输出语义：返回 `prediction_correct`、`estimated_dir` 和按并列方向折算的 rate。
     关键约束：estimated_dir 使用确定性并列选择；rate 保留旧脚本的并列折算逻辑。
     """
 
@@ -317,17 +315,17 @@ def apply_revised_weight(
     """把一个段落修正规则写回数据表。
 
     输入语义：prev/end 指定写回区间，context 提供有效方向行，revise_weight 是新权重。
-    输出语义：更新 revise_weight/revise_is_correct/predict_dir/is_vague，并返回诊断结果。
+    输出语义：更新 revised_normalized_weight/revised_prediction_correct/predict_dir/is_vague，并返回诊断结果。
     关键约束：如果 update_predict_dir 为 False，则保持旧 `reviseWrongEnergizer` 不写 predict_dir 的行为。
     """
 
     labels = list(data.loc[prev : end - 1].index)
-    assign_object_values(data, labels, "revise_weight", revise_weight)
+    assign_object_values(data, labels, "revised_normalized_weight", revise_weight)
 
     phase_is_correct, estimated_dir, rate = calculate_prediction_result(np.array(revise_weight), context)
-    data.loc[list(context.valid_indices), "revise_is_correct"] = np.array(phase_is_correct, dtype=int)
+    data.loc[list(context.valid_indices), "revised_prediction_correct"] = np.array(phase_is_correct, dtype=int)
     if len(context.nan_indices) > 0:
-        data.loc[list(context.nan_indices), "revise_is_correct"] = [np.nan] * len(context.nan_indices)
+        data.loc[list(context.nan_indices), "revised_prediction_correct"] = [np.nan] * len(context.nan_indices)
     if update_predict_dir:
         data.loc[list(context.valid_indices), "predict_dir"] = np.array(estimated_dir)
     data.loc[labels, "is_vague"] = [False] * len(labels)
@@ -370,19 +368,18 @@ def revise_vague(data: pd.DataFrame, contexts: list[tuple[int, int]]) -> None:
 
     for prev, end in contexts:
         segment = copy.deepcopy(data.loc[prev : end - 1])
-        weight = segment["revise_weight"].iloc[0]
+        weight = segment["revised_normalized_weight"].iloc[0]
         if np.sum(weight) <= 0:
+            continue
+
+        if np.max(weight) < 1:
+            # revised_normalized_weight 来自旧内部 9 维 normalized_weight 的投影；若投影后最大值小于 1，
+            # 说明旧 3/4 鬼占位 agent 曾是唯一最大值。旧流程在 two-ghost 数据中会
+            # 跳过这类 vague 段，不把它改写成可见策略，因此这里保留 vague 状态。
             continue
 
         max_indices = np.where(weight == np.max(weight))[0]
         if len(max_indices) == 1:
-            max_index = np.argmax(weight)
-            if (
-                "ifscared3" in segment.columns
-                and segment["ifscared3"].iloc[0] == -1
-                and (max_index == STRATEGY_NUMBER["evade_3"] or max_index == STRATEGY_NUMBER["evade_4"])
-            ):
-                continue
             labels = list(data.loc[prev : end - 1].index)
             data.loc[labels, "is_vague"] = [False] * len(labels)
             continue
@@ -419,8 +416,8 @@ def revise_approach(data: pd.DataFrame, contexts: list[tuple[int, int]]) -> None
         if context is None:
             continue
         agent_accuracy, _ = score_agent_accuracies(context, list(range(len(AGENTS))))
-        accuracy_approach = agent_accuracy[STRATEGY_NUMBER["approach"]]
-        agent_accuracy[STRATEGY_NUMBER["approach"]] = 0
+        accuracy_approach = agent_accuracy[AGENT_INDEX["approach"]]
+        agent_accuracy[AGENT_INDEX["approach"]] = 0
         max_index = int(np.argmax(agent_accuracy))
         if accuracy_approach == 0 or agent_accuracy[max_index] / accuracy_approach > 0.8:
             revise_weight = [0] * len(AGENTS)
@@ -448,7 +445,7 @@ def revise_wrong_energizer(data: pd.DataFrame, energizer_contexts: list[tuple[in
 
     输入语义：energizer_contexts 是连续 energizer 标签区间，区间右端是闭区间。
     输出语义：满足后继 local 且准确率不过度下降的段落被改为 local。
-    关键约束：该旧规则不写回 predict_dir，只更新 revise_is_correct 和 strategy。
+    关键约束：该旧规则不写回 predict_dir，只更新 revised_prediction_correct 和 strategy。
     """
 
     for context_range in energizer_contexts:
@@ -459,29 +456,29 @@ def revise_wrong_energizer(data: pd.DataFrame, energizer_contexts: list[tuple[in
             continue
 
         temp_index = context_range[1] + 1
-        if temp_index > data["level_0"].iloc[-1]:
+        if temp_index > data["row_id"].iloc[-1]:
             continue
         if data["strategy"].loc[temp_index] != STRATEGY_NUMBER["approach"] and data["strategy"].loc[temp_index] == STRATEGY_NUMBER["local"]:
-            original_weight = deepcopy(data["revise_weight"].loc[prev])
+            original_weight = deepcopy(data["revised_normalized_weight"].loc[prev])
             revise_weight = [0] * len(AGENTS)
-            revise_weight[STRATEGY_NUMBER["local"]] = 1
+            revise_weight[AGENT_INDEX["local"]] = 1
 
             # 旧脚本在判断失败前已经把整段临时写成 local；若准确率下降过多，
             # 再用连续 energizer 段第一行的原始权重回滚整段。这个“整段回滚”
             # 会传播第一行权重，属于旧输出的一部分，需要显式保留。
             labels = list(data.loc[prev : end - 1].index)
-            assign_object_values(data, labels, "revise_weight", revise_weight)
+            assign_object_values(data, labels, "revised_normalized_weight", revise_weight)
 
             phase_is_correct, _, rate = calculate_prediction_result(np.array(revise_weight), context)
             _, _, original_rate = calculate_prediction_result(np.array(original_weight), context)
             if rate / original_rate < 0.8:
-                assign_object_values(data, labels, "revise_weight", original_weight)
+                assign_object_values(data, labels, "revised_normalized_weight", original_weight)
                 continue
 
             data.loc[labels, "strategy"] = [STRATEGY_NUMBER["local"]] * len(labels)
-            data.loc[list(context.valid_indices), "revise_is_correct"] = np.array(phase_is_correct, dtype=int)
+            data.loc[list(context.valid_indices), "revised_prediction_correct"] = np.array(phase_is_correct, dtype=int)
             if len(context.nan_indices) > 0:
-                data.loc[list(context.nan_indices), "revise_is_correct"] = [np.nan] * len(context.nan_indices)
+                data.loc[list(context.nan_indices), "revised_prediction_correct"] = [np.nan] * len(context.nan_indices)
             data.loc[labels, "is_vague"] = [False] * len(labels)
 
 
@@ -501,24 +498,21 @@ def unique_sorted_contexts(values: Any) -> list[tuple[int, int]]:
 def process_trial(data: pd.DataFrame, input_path: Path, trial_name: str, scared_time: int) -> pd.DataFrame | None:
     """处理单个 trial 的全部手动规则。
 
-    输入语义：data 是同一 `file` 的切片，保留原始标签；trial_name 是旧 trial 名。
-    输出语义：返回修正后的 trial 数据；四 ghost trial 返回 None，沿用旧脚本跳过逻辑。
+    输入语义：data 是同一 `DayTrial` 的切片，保留原始标签；trial_name 是 trial 名。
+    输出语义：返回修正后的 two-ghost trial 数据。
     关键约束：规则执行顺序必须与旧 `reviseMain` 一致。
     """
 
-    if "ifscared3" in data.columns and data["ifscared3"].iloc[0] != -1:
-        return None
-
     recompute_strategy(data, str(input_path), trial_name)
 
-    vague_index = np.where(data["is_vague"] == True)[0] + data["level_0"].iloc[0]
+    vague_index = np.where(data["is_vague"] == True)[0] + data["row_id"].iloc[0]
     vague_contexts = unique_sorted_contexts(np.array(data["trial_context"].loc[vague_index]))
     revise_vague(data, vague_contexts)
     recompute_strategy(data, str(input_path), trial_name)
 
     context_approach = np.where(data["strategy"] == STRATEGY_NUMBER["approach"])[0]
     context_approach = list(set(list(data["trial_context"].iloc[context_approach])))
-    eat_ghost = np.where(data["eat_ghost"] == True)[0] - 1 + data["level_0"].iloc[0]
+    eat_ghost = np.where(data["eat_ghost"] == True)[0] - 1 + data["row_id"].iloc[0]
     for prev, end in deepcopy(context_approach):
         is_eat_ghost = [1 if prev <= eat_index < end else 0 for eat_index in eat_ghost]
         if 1 in is_eat_ghost:
@@ -526,11 +520,11 @@ def process_trial(data: pd.DataFrame, input_path: Path, trial_name: str, scared_
     revise_approach(data, context_approach)
     recompute_strategy(data, str(input_path), trial_name)
 
-    eat_energizer = np.where(data["eat_energizer"] == True)[0] - 1 + data["level_0"].iloc[0]
+    eat_energizer = np.where(data["eat_energizer"] == True)[0] - 1 + data["row_id"].iloc[0]
     eat_energizer_context = list(np.array(data["trial_context"].loc[eat_energizer]))
     revise_weight = [0] * len(AGENTS)
-    revise_weight[STRATEGY_NUMBER["energizer"]] = 1
-    revise_function(data, eat_energizer_context, revise_weight, STRATEGY_NUMBER["energizer"])
+    revise_weight[AGENT_INDEX["energizer"]] = 1
+    revise_function(data, eat_energizer_context, revise_weight, AGENT_INDEX["energizer"])
     recompute_strategy(data, str(input_path), trial_name)
 
     eat_energizer_next = [end for _, end in eat_energizer_context]
@@ -541,14 +535,14 @@ def process_trial(data: pd.DataFrame, input_path: Path, trial_name: str, scared_
         is1_values = list(data.loc[prev:end]["ifscared1"])
         is2_values = list(data.loc[prev:end]["ifscared2"])
         if (3 not in is1_values) and (3 not in is2_values):
-            if end + 1 < data.iloc[-1]["level_0"] and data.loc[end + 1]["strategy"] != STRATEGY_NUMBER["approach"]:
+            if end + 1 < data.iloc[-1]["row_id"] and data.loc[end + 1]["strategy"] != STRATEGY_NUMBER["approach"]:
                 eat_energizer_next_context.remove((prev, end))
-            elif end + 1 > data.iloc[-1]["level_0"]:
+            elif end + 1 > data.iloc[-1]["row_id"]:
                 eat_energizer_next_context.remove((prev, end))
 
     revise_weight = [0] * len(AGENTS)
-    revise_weight[STRATEGY_NUMBER["approach"]] = 1
-    revise_function(data, eat_energizer_next_context, revise_weight, STRATEGY_NUMBER["approach"])
+    revise_weight[AGENT_INDEX["approach"]] = 1
+    revise_function(data, eat_energizer_next_context, revise_weight, AGENT_INDEX["approach"])
     recompute_strategy(data, str(input_path), trial_name)
 
     for eat_index_position, eat_index in enumerate(eat_energizer):
@@ -556,7 +550,7 @@ def process_trial(data: pd.DataFrame, input_path: Path, trial_name: str, scared_
         if eat_index_position < len(eat_energizer) - 1:
             end = eat_energizer[eat_index_position + 1] + 1
         else:
-            end = data["level_0"].iloc[-1] + 1
+            end = data["row_id"].iloc[-1] + 1
         approach_positions = np.where(data.loc[prev : end - 1]["strategy"] == STRATEGY_NUMBER["approach"])[0]
         index_context = list(set(list(data.loc[prev : end - 1]["trial_context"].iloc[approach_positions])))
         index_context.sort(key=lambda item: item[0])
@@ -570,12 +564,12 @@ def process_trial(data: pd.DataFrame, input_path: Path, trial_name: str, scared_
             else:
                 new_context.append(context)
         revise_weight = [0] * len(AGENTS)
-        revise_weight[STRATEGY_NUMBER["approach"]] = 1
+        revise_weight[AGENT_INDEX["approach"]] = 1
         set_weight(data, new_context, revise_weight)
 
     recompute_strategy(data, str(input_path), trial_name)
 
-    energizer_index = np.where(data["strategy"] == STRATEGY_NUMBER["energizer"])[0] + data["level_0"].iloc[0]
+    energizer_index = np.where(data["strategy"] == STRATEGY_NUMBER["energizer"])[0] + data["row_id"].iloc[0]
     groups = groupby(enumerate(energizer_index), lambda index_value: index_value[0] - index_value[1])
     energizer_context = [(group_items[0][1], group_items[-1][1]) for _, group_items in ((key, list(group)) for key, group in groups)]
     revise_wrong_energizer(data, energizer_context)
@@ -589,18 +583,21 @@ def process_one_file(input_path: Path, output_dir: Path, scared_time: int = 63) 
 
     输入语义：input_path 指向旧 WeightData pickle，output_dir 是扁平输出目录。
     输出语义：写出同名 corrected weight pickle，并返回摘要。
-    关键约束：只保留 ghost2 trial；输出索引 reset，与旧脚本一致。
+    关键约束：当前输入已经是 two-ghost trial；输出索引 reset，与旧脚本一致。
     """
 
     df = pd.read_pickle(input_path)
-    df["DayTrial"] = df.file
-    df["revise_weight"] = copy.deepcopy(np.array(df["contribution"]))
-    df["revise_is_correct"] = copy.deepcopy(np.array(df["is_correct"]))
+    required_columns = {"DayTrial", "row_id", "normalized_weight", "prediction_correct", "action_dir"}
+    missing_columns = sorted(required_columns - set(df.columns))
+    if missing_columns:
+        raise ValueError(f"{input_path.name} 缺少 revise_human_weight 输入字段：{missing_columns}")
+    df["revised_normalized_weight"] = copy.deepcopy(np.array(df["normalized_weight"]))
+    df["revised_prediction_correct"] = copy.deepcopy(np.array(df["prediction_correct"]))
 
-    trial_name_list = np.unique(df.file.values)
+    trial_name_list = np.unique(df.DayTrial.values)
     all_trial_record: list[pd.DataFrame] = []
     for trial_name in trial_name_list:
-        trial_data = df[df.file == trial_name].copy()
+        trial_data = df[df.DayTrial == trial_name].copy()
         processed_trial = process_trial(trial_data, input_path, trial_name, scared_time)
         if processed_trial is not None:
             all_trial_record.append(copy.deepcopy(processed_trial))
@@ -615,7 +612,7 @@ def process_one_file(input_path: Path, output_dir: Path, scared_time: int = 63) 
         "output_file": output_path.name,
         "input_rows": int(len(df)),
         "output_rows": int(len(corrected_data)),
-        "mean_revise_is_correct": float(np.nanmean(corrected_data["revise_is_correct"])),
+        "mean_revised_prediction_correct": float(np.nanmean(corrected_data["revised_prediction_correct"])),
     }
 
 
@@ -655,10 +652,10 @@ def parse_args() -> argparse.Namespace:
     关键约束：默认路径全部位于 LoPS 仓库内，不依赖旧项目。
     """
 
-    data_root = project_root() / "data" / "revise_human_weight"
+    data_root = project_root() / "pipeline_data"
     parser = argparse.ArgumentParser(description="按旧规则修正人类策略权重数据。")
-    parser.add_argument("--input-dir", type=Path, default=data_root / "input" / "weight_data")
-    parser.add_argument("--output-dir", type=Path, default=data_root / "corrected_weight_data")
+    parser.add_argument("--input-dir", type=Path, default=data_root / "dynamic_strategy_fitting" / "weight_data")
+    parser.add_argument("--output-dir", type=Path, default=data_root / "revise_human_weight" / "corrected_weight_data")
     parser.add_argument("--processes", type=int, default=min(8, os.cpu_count() or 1))
     parser.add_argument("--scared-time", type=int, default=63)
     return parser.parse_args()

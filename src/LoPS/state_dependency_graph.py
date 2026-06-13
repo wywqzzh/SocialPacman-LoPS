@@ -21,7 +21,7 @@ from LoPS.structure_learning import (
 )
 
 
-DEFAULT_STATE_NAMES = ("IS1", "IS2", "PG1", "PG2", "PE", "BN5")
+DEFAULT_STATE_NAMES = ("IS1", "IS2", "PG1", "PG2", "PE", "BW10")
 
 
 class StateDependencyGraphError(StructureLearningError):

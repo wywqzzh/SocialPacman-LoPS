@@ -13,8 +13,8 @@ from LoPS.pacman_data.raw_subject_data_to_frame_data import convert_raw_subject_
 class PacmanFrameDataTest(unittest.TestCase):
     """验证 raw_subject_data 到 frame_data 的关键表结构约束。"""
 
-    def test_frame_data_uses_numeric_daytrial_order_before_unnamed_index(self) -> None:
-        """确认 DayTrial 按数字排序，并在排序后生成连续 Unnamed: 0。"""
+    def test_frame_data_uses_numeric_daytrial_order_before_frame_id(self) -> None:
+        """确认 DayTrial 按数字排序，并在排序后生成连续 frame_id。"""
 
         # 输入故意打乱 trial 顺序，并放入 10-1；如果按字符串排序，10-1 会排到 2-1 前面。
         raw_data = pd.DataFrame(
@@ -48,7 +48,8 @@ class PacmanFrameDataTest(unittest.TestCase):
 
         frame_data = convert_raw_subject_data_to_frame_data(raw_data)
 
-        self.assertEqual(frame_data["Unnamed: 0"].tolist(), [0, 1, 2, 3])
+        self.assertNotIn("Unnamed: 0", frame_data.columns)
+        self.assertEqual(frame_data["frame_id"].tolist(), [0, 1, 2, 3])
         self.assertEqual(
             frame_data[["DayTrial", "Step"]].apply(tuple, axis=1).tolist(),
             [
@@ -97,7 +98,8 @@ class PacmanFrameDataTest(unittest.TestCase):
 
         self.assertEqual(frame_data["DayTrial"].unique().tolist(), ["1-1-031222-401-03-Dec-2022"])
         self.assertEqual(frame_data["Step"].tolist(), [0, 1])
-        self.assertEqual(frame_data["Unnamed: 0"].tolist(), [0, 1])
+        self.assertNotIn("Unnamed: 0", frame_data.columns)
+        self.assertEqual(frame_data["frame_id"].tolist(), [0, 1])
         self.assertEqual(frame_data["ghost3Pos"].tolist(), [[], []])
         self.assertEqual(frame_data["ghost4Pos"].tolist(), [[], []])
 

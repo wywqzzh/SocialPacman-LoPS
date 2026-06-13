@@ -26,8 +26,6 @@ Q_COLUMNS: tuple[str, ...] = (
     "local_Q",
     "evade_blinky_Q",
     "evade_clyde_Q",
-    "evade_ghost3_Q",
-    "evade_ghost4_Q",
     "approach_Q",
     "energizer_Q",
     "no_energizer_Q",
@@ -44,7 +42,7 @@ def estimate_utility_for_dataframe(
     """为一个 corrected tile DataFrame 追加 hierarchical utility Q 列。
 
     输入语义：frame_data 是单个被试的 corrected tile 数据；map_data 是地图常量。
-    输出语义：返回 reset index 后追加 9 个 Q 列的新 DataFrame。
+    输出语义：返回 reset index 后追加 7 个 Q 列的新 DataFrame。
     关键约束：保留输入原有列与行顺序，只在末尾追加策略 Q 列。
     """
 
@@ -61,7 +59,7 @@ def _estimate_utility_with_compiled_map(
     """使用已编译地图为 DataFrame 追加 utility Q 列。
 
     输入语义：frame_data 是任意连续行块，compiled_map 已在文件级或进程级准备好。
-    输出语义：返回 reset index 后追加 9 个 Q 列的新 DataFrame。
+    输出语义：返回 reset index 后追加 7 个 Q 列的新 DataFrame。
     关键约束：该函数不重新编译地图，便于行块级并行任务复用同一份地图快表。
     """
 

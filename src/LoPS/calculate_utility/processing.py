@@ -2,14 +2,13 @@
 
 本模块把原先分散在 hierarchical utility、correct utility 和 dynamic
 strategy fitting 中的 Q 值处理集中到同一个阶段。输出数据已经包含拟合
-阶段需要的 ``*_Q``、``*_Q_norm``、``file``、``game`` 和
-``next_pacman_dir_fill`` 字段，后续拟合模块只负责使用这些字段。
+阶段需要的 ``*_Q``、``*_Q_norm``、``row_id``、``DayTrial``、``game_id``、
+``action_dir`` 和 ``available_dir`` 字段，后续拟合模块只负责使用这些字段。
 """
 
 from __future__ import annotations
 
 import ast
-import copy
 import pickle
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -34,11 +33,10 @@ PARSED_POSITION_COLUMNS: tuple[str, ...] = (
     "pacmanPos",
     "ghost1Pos",
     "ghost2Pos",
-    "ghost3Pos",
-    "ghost4Pos",
     "beans",
     "energizers",
 )
+LEGACY_STATUS_COLUMNS: tuple[str, ...] = ("ifscared1", "ifscared2")
 
 
 @dataclass(frozen=True)
@@ -226,16 +224,20 @@ def make_evade_q_non_negative(
     return normalize_with_inf(q_values)
 
 
-def add_fitting_identity_columns(data: pd.DataFrame) -> pd.DataFrame:
-    """补齐拟合阶段需要的 file/game/next_pacman_dir_fill 字段。
+def prepare_standard_analysis_columns(data: pd.DataFrame) -> pd.DataFrame:
+    """校验并整理拟合阶段需要的标准分析字段。
 
-    输入语义：data 是修正后的 utility DataFrame，至少包含 ``DayTrial`` 和 ``pacman_dir``。
-    输出语义：返回按旧拟合输入顺序整理后的 DataFrame。
-    关键约束：``next_pacman_dir_fill`` 按 game 分组由下一行 ``pacman_dir`` 得到。
+    输入语义：data 是修正后的 utility DataFrame，必须已经包含
+    ``DayTrial/game_id/action_dir/available_dir``。
+    输出语义：返回按 DayTrial 首次出现顺序整理后的 DataFrame。
+    关键约束：action_dir 已在 human_tile_data_preprocess 中按 corrected tile 行序生成；
+    本阶段不能再根据 arrive direction 或 shift 重新计算动作。
     """
 
-    if "DayTrial" not in data.columns or "pacman_dir" not in data.columns:
-        raise ValueError("计算 utility 需要 DayTrial 和 pacman_dir 字段。")
+    required_columns = {"DayTrial", "game_id", "action_dir", "available_dir"}
+    missing_columns = sorted(required_columns - set(data.columns))
+    if missing_columns:
+        raise ValueError(f"计算 utility 缺少标准分析字段：{missing_columns}")
 
     # 旧拟合脚本先按 DayTrial 首次出现顺序重组，使同一 trial 行连续。
     day_trials = data.DayTrial.unique()
@@ -245,35 +247,78 @@ def add_fitting_identity_columns(data: pd.DataFrame) -> pd.DataFrame:
         if column in result.columns:
             result[column] = result[column].apply(parse_literal_if_needed)
 
-    result["file"] = result.DayTrial
-    # game 去掉 round 编号，同一 game 的不同 round 共享下一步方向 shift 边界。
-    result["game"] = result.file.str.split("-").apply(lambda parts: "-".join([parts[0]] + parts[2:]))
-    grouped_trials: list[pd.DataFrame] = []
-    for _, group in result.groupby("game"):
-        group = group.copy()
-        group["next_pacman_dir_fill"] = group["pacman_dir"].shift(-1)
-        grouped_trials.append(copy.deepcopy(group))
-    result = pd.concat(grouped_trials)
-    result.reset_index(inplace=True, drop=True)
-    result["next_pacman_dir_fill"] = result.next_pacman_dir_fill.apply(
-        lambda value: value if value is not None else np.nan
-    )
+    # action_dir 缺失统一用 NaN 表示，便于后续判断无动作 trial。
+    result["action_dir"] = result["action_dir"].apply(lambda value: value if value is not None else np.nan)
+    result["available_dir"] = result["available_dir"].astype(bool)
+    return result
+
+
+def add_temporary_arrive_direction(data: pd.DataFrame) -> pd.DataFrame:
+    """为 hierarchical utility 内部补充旧 arrive direction。
+
+    输入语义：data 是标准 corrected tile 表，包含 ``DayTrial`` 和 ``action_dir``。
+    输出语义：返回临时 DataFrame，其中 ``pacman_dir`` 等于同一 DayTrial 上一行的
+    ``action_dir``。
+    关键约束：``pacman_dir`` 只用于复现 Local 等策略的历史 Q 计算，不写入本阶段输出。
+    """
+
+    if "DayTrial" not in data.columns or "action_dir" not in data.columns:
+        raise ValueError("计算临时 arrive direction 需要 DayTrial 和 action_dir 字段。")
+    result = data.copy(deep=True)
+    result["pacman_dir"] = result.groupby("DayTrial", sort=False)["action_dir"].shift(1)
+    return result
+
+
+def build_utility_estimation_input(data: pd.DataFrame) -> pd.DataFrame:
+    """构造只供 Q 估计器使用的临时输入表。
+
+    输入语义：data 是新 schema 的 corrected tile 表，ghost 状态字段已经是 int8。
+    输出语义：返回带临时 ``pacman_dir`` 的 DataFrame，并把 ifscared 字段临时转为
+    float。
+    关键约束：旧 Q 结果是在 ifscared 为 float 的输入上生成的，而历史风险判断会把
+    float 状态当作缺失标记；为了保证科研结果一致，这个兼容只发生在估计器入口，
+    正式输出会恢复为新 schema 的 int8 状态码。
+    """
+
+    result = add_temporary_arrive_direction(data)
+    missing_columns = [column for column in LEGACY_STATUS_COLUMNS if column not in result.columns]
+    if missing_columns:
+        raise ValueError(f"计算 utility 缺少 ghost 状态字段：{missing_columns}")
+    for column in LEGACY_STATUS_COLUMNS:
+        result[column] = pd.to_numeric(result[column], errors="raise").astype(float)
+    return result
+
+
+def restore_standard_input_columns(estimated_utility: pd.DataFrame, standard_input: pd.DataFrame) -> pd.DataFrame:
+    """把 Q 估计后的非 Q 字段恢复为标准数据流格式。
+
+    输入语义：estimated_utility 是估计器输出，可能携带临时 float 状态；standard_input
+    是进入 utility 阶段的新 schema 输入。
+    输出语义：返回 Q 列保持不变、标准字段 dtype 和取值恢复后的 DataFrame。
+    关键约束：只恢复调用方已经提供的标准字段，不生成或保留旧流程字段。
+    """
+
+    result = estimated_utility.copy(deep=True)
+    for column in standard_input.columns:
+        if column in result.columns:
+            # 使用原输入列覆盖估计器临时列，确保保存到下游的是新 schema。
+            result[column] = standard_input[column].to_numpy()
     return result
 
 
 def drop_no_move_trials(data: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     """删除完全没有移动方向的 trial。
 
-    输入语义：data 已包含 ``file`` 和 ``next_pacman_dir_fill``。
+    输入语义：data 已包含 ``DayTrial`` 和 ``action_dir``。
     输出语义：返回过滤后的 DataFrame 以及被删除的 trial 名称。
     关键约束：沿用旧拟合逻辑，方向列全是 float/NaN 的 trial 不参与拟合。
     """
 
     trial_records: list[pd.DataFrame] = []
     dropped_trials: list[str] = []
-    for trial_name in np.unique(data.file.values):
-        trial_data = data[data.file == trial_name]
-        pacman_direction = trial_data.next_pacman_dir_fill
+    for trial_name in np.unique(data.DayTrial.values):
+        trial_data = data[data.DayTrial == trial_name]
+        pacman_direction = trial_data.action_dir
         if np.sum(pacman_direction.apply(lambda value: isinstance(value, float))) == len(pacman_direction):
             dropped_trials.append(str(trial_name))
             continue
@@ -283,13 +328,28 @@ def drop_no_move_trials(data: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     return pd.concat(trial_records).reset_index(drop=True), dropped_trials
 
 
+def add_row_id(data: pd.DataFrame) -> pd.DataFrame:
+    """为拟合输入生成稳定行号 row_id。
+
+    输入语义：data 已完成无动作 trial 删除和最终行顺序整理。
+    输出语义：返回首列为 ``row_id`` 的 DataFrame。
+    关键约束：row_id 替代旧拟合输出中的 ``level_0`` 和 ``index``，不承载 frame id 语义。
+    """
+
+    result = data.copy(deep=True)
+    if "row_id" in result.columns:
+        result.drop(columns=["row_id"], inplace=True)
+    result.insert(0, "row_id", np.arange(len(result), dtype=np.int64))
+    return result
+
+
 def append_normalized_q_columns(
     data: pd.DataFrame,
     adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
 ) -> pd.DataFrame:
     """为修正后的 ``*_Q`` 追加 ``*_Q_norm`` 字段。
 
-    输入语义：data 已经过不可走方向修正，并完成拟合身份字段整理。
+    输入语义：data 已经过不可走方向修正，并完成标准字段整理。
     输出语义：返回追加 Q_norm 后的 DataFrame。
     关键约束：evade/no_energizer 类字段会按列级最小有限值平移，并同步修改 raw Q。
     """
@@ -321,13 +381,14 @@ def prepare_calculated_utility_dataframe(
     """把修正后的 utility 表整理成拟合可直接读取的数据。
 
     输入语义：corrected_utility 已包含修正后的 raw ``*_Q`` 字段。
-    输出语义：返回包含 ``file/game/next_pacman_dir_fill/*_Q_norm`` 的 DataFrame 和删除的 trial。
+    输出语义：返回包含 ``row_id/*_Q_norm`` 的 DataFrame 和删除的 trial。
     关键约束：该函数复现原拟合阶段中会影响 Q_norm 的全部前置数据整理。
     """
 
-    prepared = add_fitting_identity_columns(corrected_utility)
+    prepared = prepare_standard_analysis_columns(corrected_utility)
     prepared, dropped_trials = drop_no_move_trials(prepared)
-    return append_normalized_q_columns(prepared, adjacent_map), dropped_trials
+    prepared = append_normalized_q_columns(prepared, adjacent_map)
+    return add_row_id(prepared), dropped_trials
 
 
 def calculate_utility_for_dataframe(
@@ -344,7 +405,11 @@ def calculate_utility_for_dataframe(
     """
 
     config = CalculateUtilityConfig() if config is None else config
-    raw_utility = estimate_utility_for_dataframe(frame_data, map_data, config.utility_config)
+    # Q 估计器内部仍需要少量历史输入语义；这些临时字段不会写入正式输出。
+    utility_input = build_utility_estimation_input(frame_data)
+    raw_utility = estimate_utility_for_dataframe(utility_input, map_data, config.utility_config)
+    raw_utility.drop(columns=["pacman_dir"], inplace=True)
+    raw_utility = restore_standard_input_columns(raw_utility, frame_data)
     corrected_utility, changed_cells = correct_unavailable_q_values(raw_utility, adjacent_map)
     calculated_utility, dropped_trials = prepare_calculated_utility_dataframe(corrected_utility, adjacent_map)
     summary = {

@@ -281,7 +281,6 @@ def run_full_chain_from_corrected_weight(
     process_human_fmri_data(
         raw_discrete_dir=discrete_dir,
         ghost2_discrete_dir=run_dir / "fmri_discrete_feature_data_ghost2",
-        ghost4_discrete_dir=run_dir / "fmri_discrete_feature_data_ghost4",
         formed_ghost2_dir=run_dir / "fmri_formed_data_ghost2",
         strategy_sequence_dir=sequence_dir,
     )
@@ -450,4 +449,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -74,7 +74,8 @@ def build_config(args: argparse.Namespace) -> DynamicStrategyFittingConfig:
 
     输入语义：args 来自 parse_args。
     输出语义：返回 DynamicStrategyFittingConfig。
-    关键约束：agent 顺序固定为旧动态拟合使用的 9 个策略。
+    关键约束：正式输出只包含 two-ghost 数据需要的 7 个策略；模块内部会按需补齐
+    临时兼容维度，以复现旧随机优化路径。
     """
 
     return DynamicStrategyFittingConfig(

@@ -15,17 +15,15 @@ PATH_Q_COLUMNS: tuple[str, ...] = (
     "local_Q",
     "evade_blinky_Q",
     "evade_clyde_Q",
-    "evade_ghost3_Q",
-    "evade_ghost4_Q",
     "approach_Q",
     "energizer_Q",
     "no_energizer_Q",
 )
 LOCAL_INDEX = 0
 EVADE_START_INDEX = 1
-APPROACH_INDEX = 5
-ENERGIZER_INDEX = 6
-NO_ENERGIZER_INDEX = 7
+APPROACH_INDEX = 3
+ENERGIZER_INDEX = 4
+NO_ENERGIZER_INDEX = 5
 STRATEGY_COUNT = len(PATH_Q_COLUMNS)
 
 
@@ -65,7 +63,7 @@ class SharedPathUtilityEngine:
     """一次路径遍历同时估计所有路径型 utility 策略。
 
     输入语义：compiled_map 是整数化地图，frame_state 是整数化单帧状态，config 提供深度和系数。
-    输出语义：`estimate()` 返回除 Global 外的 8 个 Q 向量，可选返回 leaf 统计 trace。
+    输出语义：`estimate()` 返回除 Global 外的 6 个 Q 向量，可选返回 leaf 统计 trace。
     关键约束：路径几何只展开一次；每个策略独立维护状态、终止条件和叶节点统计。
     """
 
@@ -86,15 +84,11 @@ class SharedPathUtilityEngine:
             config.local_depth,
             config.evade_depth,
             config.evade_depth,
-            config.evade_depth,
-            config.evade_depth,
             config.approach_depth,
             config.energizer_depth,
             config.no_energizer_depth,
         )
         self.strategy_laziness_coeffs = (
-            config.laziness_coeff,
-            config.laziness_coeff,
             config.laziness_coeff,
             config.laziness_coeff,
             config.laziness_coeff,
@@ -202,8 +196,8 @@ class SharedPathUtilityEngine:
         """创建根节点上各路径策略的初始状态。
 
         输入语义：使用当前帧的 bean、energizer 和 ghost 状态。
-        输出语义：返回长度固定为 8 的策略状态 tuple。
-        关键约束：Evade 策略只携带被选择的单只 ghost 状态，其余策略携带完整 ghost 状态。
+        输出语义：返回长度固定为 6 的策略状态 tuple。
+        关键约束：Evade 策略只携带被选择的单只 ghost 状态，其余策略携带完整 two-ghost 状态。
         """
 
         frame = self.frame_state
@@ -571,7 +565,7 @@ def estimate_all_q_values(
     frame_state: CompiledFrameState,
     config: UtilityConfig,
 ) -> dict[str, np.ndarray]:
-    """估计单帧的全部 9 个 hierarchical utility Q 值。
+    """估计单帧的全部 7 个 hierarchical utility Q 值。
 
     输入语义：compiled_map 是地图快表，frame_state 是单帧快表，config 是策略参数。
     输出语义：返回 Q 列名到四方向 Q 向量的字典。

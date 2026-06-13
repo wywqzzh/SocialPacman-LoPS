@@ -1,0 +1,67 @@
+{
+  "question": "旧版本流程使用旧版 adjacent_map_fmri.csv 时是否也会产生同样错误",
+  "conclusion": "会。已定位旧代码库中的 adjacent_map_fmri.csv，所有候选旧版 fMRI 邻接表均与当前 pipeline_data/constant_data/adjacent_map_fmri.csv 哈希一致，且均不包含 (13,16)。旧版 PreEstimation_fmri 在 GlobalAgent_beyond10 初始化时会访问 adjacent_data[cur_pos]，因此 cur_pos=(13,16) 时也会触发 KeyError。",
+  "old_adjacent_map_candidates": [
+    {
+      "path": "/home/zzh/project/Pacman/2.Pac-man/Monkey_Analysis/Data/constant/adjacent_map_fmri.csv",
+      "rows": 329,
+      "sha256_prefix": "121a9c9b9d7a2d0b",
+      "has_13_16": false
+    },
+    {
+      "path": "/home/zzh/project/Pacman/2.Pac-man/Monkey_Analysis/Data/Constants/adjacent_map_fmri.csv",
+      "rows": 329,
+      "sha256_prefix": "121a9c9b9d7a2d0b",
+      "has_13_16": false
+    },
+    {
+      "path": "/home/zzh/project/Pacman/Language-of-Problem-Solving/ConstantData/adjacent_map_fmri.csv",
+      "rows": 329,
+      "sha256_prefix": "121a9c9b9d7a2d0b",
+      "has_13_16": false
+    },
+    {
+      "path": "/home/zzh/project/Pacman/Language-of-Problem-Solving/tmp_lops_fitting_weight_validation_20260606/ConstantData/adjacent_map_fmri.csv",
+      "rows": 329,
+      "sha256_prefix": "121a9c9b9d7a2d0b",
+      "has_13_16": false
+    },
+    {
+      "path": "/home/zzh/project/LoPS/pipeline_data/constant_data/adjacent_map_fmri.csv",
+      "rows": 329,
+      "sha256_prefix": "121a9c9b9d7a2d0b",
+      "has_13_16": false
+    }
+  ],
+  "old_code_evidence": [
+    {
+      "file": "/home/zzh/project/Pacman/2.Pac-man/Monkey_Analysis/Behavior_Analysis/HierarchicalModel/PreEstimation_fmri.py",
+      "lines": "72-74",
+      "detail": "旧版默认读取 ../../Data/constant/adjacent_map_fmri.csv"
+    },
+    {
+      "file": "/home/zzh/project/Pacman/Language-of-Problem-Solving/Behavior_Analysis/HierarchicalModel/PreEstimation_fmri.py",
+      "lines": "72-74",
+      "detail": "同源旧版也读取 ../../Data/constant/adjacent_map_fmri.csv"
+    },
+    {
+      "file": "/home/zzh/project/Pacman/Language-of-Problem-Solving/Behavior_Analysis/HierarchicalModel/Agent/GlobalAgent_beyond10.py",
+      "lines": "84-86",
+      "detail": "初始化时直接执行 adjacent_data[self.cur_pos]"
+    }
+  ],
+  "failed_data_point": {
+    "file": "pipeline_data/human_tile_data_preprocess/corrected_tile_data/131122-401-13-Nov-2022-1_frame_data.pkl",
+    "position": [
+      13,
+      16
+    ],
+    "count": 2,
+    "day_trial": "29-1-131222-401-13-Nov-2022",
+    "steps": [
+      1500,
+      1525
+    ]
+  },
+  "dynamic_probe_note": "尝试动态导入旧 PreEstimation_fmri 时，当前可用 Python/fmri 环境缺少旧脚本依赖 anytree，因此本报告采用旧常量文件定位 + 旧代码访问路径的静态确认。"
+}

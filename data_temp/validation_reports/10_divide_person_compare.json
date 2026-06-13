@@ -1,0 +1,14 @@
+{
+  "features_equal": true,
+  "labels_equal": true,
+  "cluster_signature_equal": true,
+  "current_cluster_sizes": [
+    25,
+    9
+  ],
+  "legacy_cluster_sizes": [
+    25,
+    9
+  ],
+  "is_exact_match": true
+}

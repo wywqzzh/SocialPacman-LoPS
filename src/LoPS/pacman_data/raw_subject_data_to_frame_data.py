@@ -231,6 +231,9 @@ def convert_raw_subject_data_to_frame_data(df: pd.DataFrame) -> pd.DataFrame:
     # 这里显式 groupby(first)，保证后续每个输出行都是唯一的一帧。
     keys = ["DayTrial", "Step"]
     grouped_first = df.groupby(keys, sort=False, as_index=False).first()
+    # 当前完整流程只保留 two-ghost trial。four-ghost trial 会在后续 fMRI utility
+    # 中进入地图常量未覆盖的位置，因此在 frame_data 生成阶段按整局直接过滤。
+    grouped_first = _filter_two_ghost_trials(grouped_first)
     # frame data 是后续 tile 抽样和 frameIndex 回指的基础表，必须先按 trial 数字编号
     # 和帧号稳定排序，再生成 Unnamed: 0，避免字符串排序把 10-1 排在 2-1 前面。
     grouped_first = _sort_grouped_frame_by_daytrial_step(grouped_first)
@@ -279,6 +282,43 @@ def convert_raw_subject_data_to_frame_data(df: pd.DataFrame) -> pd.DataFrame:
     # 它复制为 frameIndex，用于从 tile 抽样点回到原始 frame 区间补中间格。
     data_frame.insert(0, "Unnamed: 0", np.arange(len(data_frame), dtype=np.int64))
     return data_frame
+
+
+def _filter_two_ghost_trials(frame: pd.DataFrame) -> pd.DataFrame:
+    """只保留 two-ghost trial，丢弃 four-ghost trial。
+
+    输入语义：frame 是按 ``DayTrial`` 和 ``Step`` 去重后的逐帧原始表，可能包含
+    ``ghost3_1/ghost3_2/ghost4_1/ghost4_2`` 列。
+    输出语义：返回只包含第三、第四个 ghost 全程为空的 trial。
+    关键约束：过滤粒度是完整 ``DayTrial``，不能只删除四鬼帧，否则同一局内部
+    的轨迹和 reward 状态会被截断，后续 tile 抽样也会失去语义。
+    """
+
+    if "DayTrial" not in frame.columns:
+        raise FrameDataError("输入数据缺少 DayTrial，无法按 trial 过滤 two-ghost 数据。")
+
+    ghost_presence_columns = [
+        column
+        for column in ("ghost3_1", "ghost3_2", "ghost4_1", "ghost4_2")
+        if column in frame.columns
+    ]
+    if not ghost_presence_columns:
+        # 输入完全没有第三、第四个 ghost 字段时，按 two-ghost 数据处理。
+        return frame.reset_index(drop=True)
+
+    has_extra_ghost = pd.Series(False, index=frame.index)
+    for column in ghost_presence_columns:
+        numeric_values = pd.to_numeric(frame[column], errors="coerce")
+        # NaN 或 inf 表示该 ghost 不存在；有限数值表示 four-ghost trial。
+        has_extra_ghost = has_extra_ghost | (numeric_values.notna() & ~np.isinf(numeric_values))
+
+    four_ghost_day_trials = set(frame.loc[has_extra_ghost, "DayTrial"])
+    if not four_ghost_day_trials:
+        return frame.reset_index(drop=True)
+
+    filtered = frame.loc[~frame["DayTrial"].isin(four_ghost_day_trials)].copy()
+    filtered.reset_index(drop=True, inplace=True)
+    return filtered
 
 
 def _sort_grouped_frame_by_daytrial_step(frame: pd.DataFrame) -> pd.DataFrame:

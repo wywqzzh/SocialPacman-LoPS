@@ -1,0 +1,18 @@
+{
+  "legacy_root": "/home/zzh/project/Pacman/Language-of-Problem-Solving",
+  "raw_discrete_dir": "data_temp/extract_features_human/discrete_feature_data",
+  "split": {
+    "raw_files": 34,
+    "written_ghost2_files": 34,
+    "written_ghost4_files": 0
+  },
+  "formed": {
+    "input_ghost2_files": 34,
+    "formed_ghost2_files": 34,
+    "rows": 11612
+  },
+  "strategy_sequence": {
+    "formed_input_files": 34,
+    "strategy_sequence_files": 34
+  }
+}

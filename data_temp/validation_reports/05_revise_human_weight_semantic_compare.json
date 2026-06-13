@@ -1,0 +1,17 @@
+{
+  "current_dir": "pipeline_data/revise_human_weight/corrected_weight_data",
+  "legacy_dir": "data_temp/revise_human_weight/corrected_weight_data",
+  "checked_files": 34,
+  "ignored_columns": [
+    "fruitPos",
+    "fruitType",
+    "predict_dir",
+    "revise_is_correct"
+  ],
+  "failed_files": {},
+  "total_diagnostic_diffs": {
+    "predict_dir": 7875,
+    "revise_is_correct": 7222
+  },
+  "is_exact_semantic_match": true
+}

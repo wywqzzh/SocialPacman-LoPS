@@ -1,0 +1,214 @@
+{
+  "legacy_root": "/home/zzh/project/Pacman/Language-of-Problem-Solving",
+  "strategy_sequence_dir": "data_temp/human_fmri_data_preprocess/strategy_sequence",
+  "state_graph_dir": "data_temp/state_dependency_graph/state_dependency_graph_data",
+  "output_dir": "data_temp/generate_grammar/grammar",
+  "file_count": 34,
+  "skip_gram_files": 13,
+  "files": [
+    {
+      "input_file": "031222-401.pkl",
+      "grammar_count": 12,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "041122-401.pkl",
+      "grammar_count": 13,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "041122-403.pkl",
+      "grammar_count": 11,
+      "skip_gram": true,
+      "skip_gram_count": 101
+    },
+    {
+      "input_file": "041222-401.pkl",
+      "grammar_count": 13,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "051122-401.pkl",
+      "grammar_count": 11,
+      "skip_gram": true,
+      "skip_gram_count": 61
+    },
+    {
+      "input_file": "051122-402.pkl",
+      "grammar_count": 12,
+      "skip_gram": true,
+      "skip_gram_count": 118
+    },
+    {
+      "input_file": "071122-401.pkl",
+      "grammar_count": 13,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "071122-402.pkl",
+      "grammar_count": 14,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "071122-403.pkl",
+      "grammar_count": 12,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "081122-401.pkl",
+      "grammar_count": 13,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "091122-401.pkl",
+      "grammar_count": 12,
+      "skip_gram": true,
+      "skip_gram_count": 119
+    },
+    {
+      "input_file": "100522-501.pkl",
+      "grammar_count": 12,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "101122-401.pkl",
+      "grammar_count": 12,
+      "skip_gram": true,
+      "skip_gram_count": 118
+    },
+    {
+      "input_file": "101122-402.pkl",
+      "grammar_count": 11,
+      "skip_gram": true,
+      "skip_gram_count": 70
+    },
+    {
+      "input_file": "111122-401.pkl",
+      "grammar_count": 11,
+      "skip_gram": true,
+      "skip_gram_count": 50
+    },
+    {
+      "input_file": "131122-401.pkl",
+      "grammar_count": 10,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "131122-402.pkl",
+      "grammar_count": 13,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "141122-401.pkl",
+      "grammar_count": 12,
+      "skip_gram": true,
+      "skip_gram_count": 69
+    },
+    {
+      "input_file": "141122-402.pkl",
+      "grammar_count": 13,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "151122-401.pkl",
+      "grammar_count": 13,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "161122-401.pkl",
+      "grammar_count": 13,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "161122-402.pkl",
+      "grammar_count": 13,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "161122-403.pkl",
+      "grammar_count": 11,
+      "skip_gram": true,
+      "skip_gram_count": 62
+    },
+    {
+      "input_file": "161122-404.pkl",
+      "grammar_count": 10,
+      "skip_gram": true,
+      "skip_gram_count": 35
+    },
+    {
+      "input_file": "171122-401.pkl",
+      "grammar_count": 12,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "180522-502.pkl",
+      "grammar_count": 13,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "200522-501.pkl",
+      "grammar_count": 11,
+      "skip_gram": true,
+      "skip_gram_count": 43
+    },
+    {
+      "input_file": "211122-402.pkl",
+      "grammar_count": 10,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "231122-401.pkl",
+      "grammar_count": 13,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "231122-402.pkl",
+      "grammar_count": 13,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "241122-401.pkl",
+      "grammar_count": 11,
+      "skip_gram": true,
+      "skip_gram_count": 64
+    },
+    {
+      "input_file": "241122-402.pkl",
+      "grammar_count": 13,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "301122-402.pkl",
+      "grammar_count": 13,
+      "skip_gram": false,
+      "skip_gram_count": 0
+    },
+    {
+      "input_file": "311022-401.pkl",
+      "grammar_count": 12,
+      "skip_gram": true,
+      "skip_gram_count": 52
+    }
+  ]
+}

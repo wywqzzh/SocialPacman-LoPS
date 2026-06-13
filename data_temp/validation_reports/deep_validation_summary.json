@@ -1,0 +1,77 @@
+{
+  "status": "stopped",
+  "stopped_stage": "02_hierarchical_utility",
+  "reason": "current_pipeline_failed_before_legacy_comparison",
+  "cpu_available": 256,
+  "initial_input_dir": "pipeline_data/pacman_data/frame_data",
+  "normalized_input_dir": "pipeline_data/deep_validation/frame_data_normalized",
+  "stage_results": [
+    {
+      "stage": "00_frame_input_normalization",
+      "status": "passed",
+      "report": "data_temp/validation_reports/00_frame_input_normalization.json",
+      "note": "补出 Unnamed: 0；不改变游戏状态语义。"
+    },
+    {
+      "stage": "01_human_tile_data_preprocess",
+      "status": "passed",
+      "current_outputs": [
+        "pipeline_data/human_tile_data_preprocess/tile_data",
+        "pipeline_data/human_tile_data_preprocess/corrected_tile_data"
+      ],
+      "legacy_outputs": [
+        "data_temp/human_tile_data_preprocess/tile_data",
+        "data_temp/human_tile_data_preprocess/corrected_tile_data"
+      ],
+      "reports": [
+        "data_temp/validation_reports/01_legacy_human_tile_data_preprocess_run.json",
+        "data_temp/validation_reports/01_tile_data_compare.json",
+        "data_temp/validation_reports/01_corrected_tile_data_compare.json"
+      ],
+      "conclusion": "tile_data 和 corrected_tile_data 均为 34 个文件，语义完全一致。"
+    },
+    {
+      "stage": "02_hierarchical_utility",
+      "status": "failed",
+      "current_command": "PYTHONPATH=src python script/hierarchical_utility/run_preestimate_fmri_utility.py --input-dir pipeline_data/human_tile_data_preprocess/corrected_tile_data --output-dir pipeline_data/hierarchical_utility/utility_data --constant-dir pipeline_data/constant_data --workers 34",
+      "current_partial_output_dir": "pipeline_data/hierarchical_utility/utility_data",
+      "current_partial_file_count": 33,
+      "exception": "KeyError: (13, 16)",
+      "failed_input_file": "pipeline_data/human_tile_data_preprocess/corrected_tile_data/131122-401-13-Nov-2022-1_frame_data.pkl",
+      "invalid_position": [
+        13,
+        16
+      ],
+      "invalid_position_count": 2,
+      "invalid_rows": [
+        {
+          "row_index": 4570,
+          "DayTrial": "29-1-131222-401-13-Nov-2022",
+          "Step": 1500,
+          "Unnamed: 0": 146262,
+          "frameIndex": 146262,
+          "pacmanPos": [
+            13.0,
+            16.0
+          ],
+          "pacman_dir": "down"
+        },
+        {
+          "row_index": 4571,
+          "DayTrial": "29-1-131222-401-13-Nov-2022",
+          "Step": 1525,
+          "Unnamed: 0": 146287,
+          "frameIndex": 146287,
+          "pacmanPos": [
+            13.0,
+            16.0
+          ],
+          "pacman_dir": "NaN"
+        }
+      ],
+      "map_check": "(13, 16) 不存在于 pipeline_data/constant_data/adjacent_map_fmri.csv。",
+      "legacy_stage_ran": false,
+      "stop_rule": "当前阶段当前流程未成功产生完整输出，因此停止，不进入旧流程同阶段和后续阶段。"
+    }
+  ]
+}

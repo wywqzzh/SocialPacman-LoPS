@@ -1314,6 +1314,35 @@
             </p>
           </div>
         </div>
+        <h3>grammar_data 字段要求</h3>
+        <p class="table-note">
+          <code>data/pacman_video/grammar_data</code> 中的文件是视频流程专用的 tile-level 策略/方向标注表，
+          用来和 <code>data/02_frame_data</code> 中的逐帧 <code>DayTrial</code>/<code>Step</code> 对齐。
+          当前标准数据流使用 <code>DayTrial</code>、<code>Step</code>、<code>strategy</code>，
+          不再把旧字段 <code>file</code> 和 <code>fitted_label</code> 作为正式输入要求。
+        </p>
+        <table>
+          <thead>
+            <tr><th>字段</th><th>是否必需</th><th>含义</th><th>类型/格式</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>DayTrial</code></td><td>必需</td><td>trial 标识，必须能和 frame data 的 <code>DayTrial</code> 对齐。</td><td><code>str</code></td></tr>
+            <tr><td><code>Step</code></td><td>必需</td><td>tile/key frame 在 trial 内的位置，用于把 tile-level 标注映射到逐帧数据。</td><td><code>int</code>；通常为关键帧下标</td></tr>
+            <tr><td><code>strategy</code></td><td>必需</td><td>当前 tile 对应的策略编号；render table 阶段会把它转换成视频侧边栏使用的策略标签。</td><td><code>int</code>；沿用主流程策略编号</td></tr>
+            <tr><td><code>pacmanPos</code></td><td>条件必需</td><td>当输入没有真实动作方向字段时，用相邻 tile 的 Pacman 位置推断真实移动方向。</td><td><code>tuple[int, int]</code>、列表或可解析字符串</td></tr>
+            <tr><td><code>weight</code></td><td>条件必需</td><td>当输入没有模型预测方向字段时，和各策略 <code>*_Q_norm</code> 加权计算模型预测方向。</td><td><code>list/np.ndarray[float]</code></td></tr>
+            <tr><td><code>*_Q_norm</code></td><td>条件必需</td><td>当输入没有模型预测方向字段时，提供每个策略在四个方向上的归一化 Q 值；方向顺序为 <code>left/right/up/down</code>。</td><td><code>list/np.ndarray(shape=(4,))</code></td></tr>
+            <tr><td><code>gram</code></td><td>可选</td><td>视频侧边栏展示的 grammar/chunk 文本。</td><td><code>str</code> 或缺失</td></tr>
+            <tr><td><code>gram_num</code></td><td>可选</td><td>当前 grammar/chunk 的编号或类别计数，用于展示辅助信息。</td><td><code>int</code> 或缺失</td></tr>
+            <tr><td><code>gramStart</code></td><td>可选</td><td>当前 grammar/chunk 在序列中的起始位置，用于展示辅助信息。</td><td><code>int</code> 或缺失</td></tr>
+            <tr><td><code>gramLen</code></td><td>可选</td><td>当前 grammar/chunk 的长度，用于展示辅助信息。</td><td><code>int</code> 或缺失</td></tr>
+          </tbody>
+        </table>
+        <p class="note">
+          兼容说明：旧视频数据可能包含 <code>file</code> 和 <code>fitted_label</code>。
+          当前代码仍可读取这些旧字段，但新数据应分别使用 <code>DayTrial</code> 和 <code>strategy</code>；
+          <code>fitted_label</code> 会在 render table 生成阶段由 <code>strategy</code> 临时派生。
+        </p>
       </section>
 
       <section id="video-02">

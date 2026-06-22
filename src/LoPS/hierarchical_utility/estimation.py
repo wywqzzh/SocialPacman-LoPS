@@ -132,7 +132,7 @@ def process_utility_directory(
         return _process_directory_by_row_chunks(input_dir, output_dir, map_data, config, workers, row_chunk_size)
 
     tasks = [
-        (input_path, output_dir / f"{input_path.stem}-with_Q.pkl", map_data, config)
+        (input_path, output_dir / input_path.name, map_data, config)
         for input_path in sorted(input_dir.glob("*.pkl"))
     ]
 
@@ -180,7 +180,7 @@ def _process_directory_by_row_chunks(
     """按行块并行处理整个目录。
 
     输入语义：input_dir/output_dir 是数据目录，row_chunk_size 控制每个并行任务包含的行数。
-    输出语义：每个被试仍保存为一个完整 `{subject}-with_Q.pkl` 文件，并返回摘要列表。
+    输出语义：每个被试仍保存为一个完整同名 pickle 文件，并返回摘要列表。
     关键约束：行块只改变调度方式；拼接时按 file_index 和 chunk_index 恢复原始行顺序。
     """
 
@@ -188,7 +188,7 @@ def _process_directory_by_row_chunks(
     file_infos: list[tuple[Path, Path, int]] = []
     chunk_tasks: list[tuple[int, int, pd.DataFrame]] = []
     for file_index, input_path in enumerate(sorted(input_dir.glob("*.pkl"))):
-        output_path = output_dir / f"{input_path.stem}-with_Q.pkl"
+        output_path = output_dir / input_path.name
         with input_path.open("rb") as file:
             frame_data = pickle.load(file).reset_index(drop=True)
         file_infos.append((input_path, output_path, int(frame_data.shape[0])))

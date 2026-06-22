@@ -25,10 +25,10 @@ class GenerateGrammarPipelineTest(unittest.TestCase):
         """验证预处理会删除 N token 并同步对齐状态特征行。"""
         # prepare 阶段必须保证 token_sequence 与 state_features 等长，否则后续状态条件会错位。
         record = load_strategy_state_data(
-            STRATEGY_SEQUENCE_DIR / "031222-401.pkl",
+            STRATEGY_SEQUENCE_DIR / "031222-401-03-Dec-2022-1.pkl",
             DEFAULT_STATE_NAMES,
         )
-        state_dependencies = load_state_dependency_graph(STATE_GRAPH_DIR / "031222-401.pkl")
+        state_dependencies = load_state_dependency_graph(STATE_GRAPH_DIR / "031222-401-03-Dec-2022-1.pkl")
 
         prepared = prepare_strategy_state_data(record, state_dependencies)
 
@@ -52,7 +52,7 @@ class GenerateGrammarPipelineTest(unittest.TestCase):
 
                 progress_events.append((event, dict(payload)))
 
-            output = process_strategy_state_file("031222-401.pkl", config, progress_callback=capture_progress)
+            output = process_strategy_state_file("031222-401-03-Dec-2022-1.pkl", config, progress_callback=capture_progress)
 
         # 核心 pipeline 返回面向正式模块的结构化分区，格式转换由验证脚本单独处理。
         self.assertEqual(set(output.keys()), {"source", "parameters", "grammar", "parsed", "skip_gram"})
@@ -71,7 +71,7 @@ class GenerateGrammarPipelineTest(unittest.TestCase):
         self.assertIn("skip_gram", event_names)
         self.assertIn("file_finished", event_names)
         # 所有单文件事件都应携带输入文件名，运行脚本才能把过程信息归属到具体被试。
-        self.assertTrue(all(payload["input_file_name"] == "031222-401.pkl" for _, payload in progress_events))
+        self.assertTrue(all(payload["input_file_name"] == "031222-401-03-Dec-2022-1.pkl" for _, payload in progress_events))
 
 
 if __name__ == "__main__":

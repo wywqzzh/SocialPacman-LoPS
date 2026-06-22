@@ -58,10 +58,10 @@ class GenerateGrammarFoundationTest(unittest.TestCase):
         """验证策略序列 pickle 会被读取为正式数据记录对象。"""
         # 使用代表性真实文件，检查序列、状态特征和参与者文件名等核心字段的数据形态。
         record = load_strategy_state_data(
-            STRATEGY_SEQUENCE_DIR / "031222-401.pkl",
+            STRATEGY_SEQUENCE_DIR / "031222-401-03-Dec-2022-1.pkl",
             DEFAULT_STATE_NAMES,
         )
-        self.assertEqual(record.input_file_name, "031222-401.pkl")
+        self.assertEqual(record.input_file_name, "031222-401-03-Dec-2022-1.pkl")
         self.assertIsInstance(record.token_sequence, list)
         self.assertIsInstance(record.initial_tokens, list)
         self.assertEqual(list(record.state_features.columns), list(DEFAULT_STATE_NAMES))
@@ -71,7 +71,7 @@ class GenerateGrammarFoundationTest(unittest.TestCase):
     def test_load_state_dependency_graph(self) -> None:
         """验证状态依赖图 pickle 会生成按状态索引组织的条件依赖列表。"""
         # StateGraph 的 G 矩阵会被转换成每个状态的条件依赖列表。
-        graph = load_state_dependency_graph(STATE_GRAPH_DIR / "031222-401.pkl")
+        graph = load_state_dependency_graph(STATE_GRAPH_DIR / "031222-401-03-Dec-2022-1.pkl")
         self.assertTrue(graph.conditions_by_state)
         self.assertIsInstance(graph.conditions_by_state[0], list)
 

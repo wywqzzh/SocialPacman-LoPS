@@ -131,7 +131,7 @@ def convert_mat_root_to_raw_subject_data(
     """读取 ``raw_root`` 下所有 subject/session，并单独保存为 raw_subject_data PKL。
 
     输入语义：raw_root 下每个 session 目录包含多个 trial `.mat` 文件。
-    输出语义：每个 session 目录对应一个 `{session}_raw_subject_data.pkl`。
+    输出语义：每个 session 目录对应一个 `{session}.pkl`。
     关键约束：输出文件仍保留 session 原名，便于回溯到 raw_mat_data。
     """
 
@@ -202,7 +202,7 @@ def _convert_subject_worker(task: tuple[str, str, bool]) -> dict[str, object]:
     if add_key:
         session_data["Key"] = session_data["DayTrial"].astype(str) + "-" + session_data["Step"].astype(str)
 
-    output_path = output_dir / f"{session_dir.name}_raw_subject_data.pkl"
+    output_path = output_dir / f"{session_dir.name}.pkl"
     session_data.to_pickle(output_path)
     return {
         "subject": session_dir.name,

@@ -398,14 +398,23 @@ def predictor_for_prediction(feature_data: pd.DataFrame) -> pd.DataFrame:
 
 
 def output_file_name(input_path: Path) -> str:
-    """根据旧脚本规则生成输出文件名。
+    """根据标准命名规则生成输出文件名。
 
-    输入语义：input_path 是 CorrectedWeightData 中带长后缀的文件路径。
-    输出语义：返回由前两个 `-` 分段组成的短文件名，例如 `031222-401.pkl`。
-    关键约束：该规则直接影响下游被试文件名，不能随意改动。
+    输入语义：input_path 是 CorrectedWeightData 中的单被试 pickle。
+    输出语义：返回只由被试编号、日期和 session 序号组成的文件名，例如
+    ``031222-401-03-Dec-2022-1.pkl``。
+    关键约束：正式输入已经是标准文件名；这里仅剥离历史阶段后缀，避免旧数据适配污染下游。
     """
 
-    return "-".join(input_path.name.split("-")[:2]) + ".pkl"
+    stem = input_path.stem
+    for suffix in [
+        "_frame_data-with_Q-merge_weight-dynamic-res",
+        "_frame_data-with_Q",
+        "_frame_data",
+        "_raw_subject_data",
+    ]:
+        stem = stem.removesuffix(suffix)
+    return f"{stem}.pkl"
 
 
 def append_legacy_columns(features: pd.DataFrame, source_data: pd.DataFrame) -> pd.DataFrame:

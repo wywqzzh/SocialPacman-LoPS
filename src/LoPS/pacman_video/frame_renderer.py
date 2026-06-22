@@ -919,7 +919,7 @@ def load_render_rows(
     不显示，游戏本身仍然会渲染。
     """
 
-    data_path = render_table_dir / f"{subject}_merged_frame_data.pkl"
+    data_path = resolve_render_table_path(render_table_dir, subject)
     merged = pd.read_pickle(data_path)
     # 这些是画出游戏帧的最低字段；grammar/方向不是必需列，因为可能有些帧无标注。
     required_columns = {
@@ -954,6 +954,32 @@ def load_render_rows(
     if max_frames:
         merged = merged.iloc[:max_frames]
     return merged.reset_index(drop=True)
+
+
+def resolve_render_table_path(render_table_dir: Path, subject: str) -> Path:
+    """根据 subject 参数定位 render table pickle。
+
+    输入语义：subject 可以是完整 ``{subject/session}``，也可以是旧视频脚本常用的
+    ``041122-403`` 短前缀。
+    输出语义：返回实际存在的 render table 路径。
+    关键约束：正式文件名不再带 ``_merged_frame_data`` 后缀；旧后缀只作为读取兼容兜底。
+    """
+
+    exact_path = render_table_dir / f"{subject}.pkl"
+    if exact_path.exists():
+        return exact_path
+
+    candidates = sorted(render_table_dir.glob(f"{subject}-*.pkl"))
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise FileNotFoundError(f"{render_table_dir} 中存在多个匹配 {subject!r} 的 render table：{candidates}")
+
+    legacy_path = render_table_dir / f"{subject}_merged_frame_data.pkl"
+    if legacy_path.exists():
+        return legacy_path
+
+    raise FileNotFoundError(f"在 {render_table_dir} 中找不到 {subject!r} 对应的 render table pickle。")
 
 
 def load_data(args: argparse.Namespace) -> pd.DataFrame:

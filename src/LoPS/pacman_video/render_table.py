@@ -140,12 +140,13 @@ def find_subject_paths(
         frame_data = frame_data.resolve()
 
     output_dir = output_root
+    output_stem = frame_data.stem
     return SubjectPaths(
         subject=subject,
         frame_data=str(frame_data),
         gram_pkl=str(gram_pkl),
         output_dir=str(output_dir),
-        merged_frame_pkl=str(output_dir / f"{subject}_merged_frame_data.pkl"),
+        merged_frame_pkl=str(output_dir / f"{output_stem}.pkl"),
     )
 
 
@@ -211,7 +212,7 @@ def process_subject(paths: SubjectPaths, *, ghost_count: str = "2") -> Processin
     2. 读取 tile-level grammar/model pkl；
     3. 根据 ``--ghost-count`` 过滤 trial；
     4. 把 tile-level 的策略、model 方向和 actual 方向扩展到逐帧；
-    5. 保存一个扁平的 ``{subject}_merged_frame_data.pkl``。
+    5. 保存一个扁平的 ``{subject/session}.pkl``。
     """
 
     frame_df = read_frame_table(Path(paths.frame_data))
@@ -374,6 +375,9 @@ def _remove_obsolete_outputs(output_dir: Path, subject: str) -> None:
         path = output_dir / f"{subject}_{suffix}.csv"
         if path.exists():
             path.unlink()
+        legacy_pickle = output_dir / f"{subject}_{suffix}.pkl"
+        if legacy_pickle.exists():
+            legacy_pickle.unlink()
     for path in output_dir.glob(f"{subject}_*.json"):
         path.unlink()
 

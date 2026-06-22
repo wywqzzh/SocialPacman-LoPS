@@ -433,7 +433,7 @@ def process_calculate_utility_file(
 
     输入语义：input_path 是单被试 corrected tile 数据，output_path 是目标 pickle。
     输出语义：写出包含 ``*_Q`` 和 ``*_Q_norm`` 的 DataFrame，并返回摘要。
-    关键约束：输出文件名由调用方决定，标准运行脚本使用 ``{stem}-with_Q.pkl``。
+    关键约束：输出文件名由调用方决定，标准运行脚本沿用输入文件名。
     """
 
     input_path = Path(input_path)
@@ -462,7 +462,7 @@ def process_calculate_utility_directory(
     """批量处理 corrected tile 目录并生成集中 utility 数据。
 
     输入语义：input_dir 是扁平 `.pkl` 输入目录，output_dir 是集中 utility 输出目录。
-    输出语义：每个输入文件写出一个 ``{stem}-with_Q.pkl``，返回文件摘要列表。
+    输出语义：每个输入文件写出同名 pickle，返回文件摘要列表。
     关键约束：文件之间没有状态共享；排序只用于稳定输出和 seed 无关的验证。
     """
 
@@ -476,10 +476,7 @@ def process_calculate_utility_directory(
         raise FileNotFoundError(f"输入目录中没有 pickle 文件：{input_dir}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    tasks = [
-        (input_path, output_dir / f"{input_path.stem}-with_Q.pkl", map_data, adjacent_map, config)
-        for input_path in input_paths
-    ]
+    tasks = [(input_path, output_dir / input_path.name, map_data, adjacent_map, config) for input_path in input_paths]
     if workers <= 1:
         return [_process_calculate_utility_task(task) for task in tasks]
     with ProcessPoolExecutor(max_workers=min(workers, len(tasks))) as executor:

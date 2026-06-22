@@ -1164,7 +1164,7 @@ def process_dynamic_strategy_directory(
     """批量处理集中 utility 目录。
 
     输入语义：input_dir 是 calculate_utility 的扁平 pickle 目录，output_dir 是 WeightData 输出目录。
-    输出语义：每个输入文件写出 ``{stem}-merge_weight-dynamic-res.pkl``，返回摘要列表。
+    输出语义：每个输入文件写出同名 pickle，返回摘要列表。
     关键约束：文件间独立；设置 seed 时按排序后的文件序号派生文件级 seed。
     """
 
@@ -1182,7 +1182,7 @@ def process_dynamic_strategy_directory(
     tasks = [
         (
             input_file,
-            output_dir / f"{input_file.stem}-merge_weight-dynamic-res.pkl",
+            output_dir / input_file.name,
             adjacent_map,
             config,
             file_index,

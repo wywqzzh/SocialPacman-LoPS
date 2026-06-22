@@ -112,9 +112,9 @@ def convert_raw_subject_data_to_frame_data_dir(
 ) -> list[dict[str, object]]:
     """并行转换 ``input_dir`` 下的 raw_subject_data PKL。
 
-    输入文件名约定为 ``{subject/session}_raw_subject_data.pkl``，输出文件名为
-    ``{subject/session}_frame_data.pkl``。这样下游可以按被试名前缀自动查找
-    frame_data，同时仍能保留 session 日期信息。
+    输入文件名约定为 ``{subject/session}.pkl``，输出文件名也保持为
+    ``{subject/session}.pkl``。这样所有阶段都只使用被试编号和日期作为文件名，
+    不再把阶段名称写进文件名。
     """
 
     if not input_dir.exists():
@@ -122,14 +122,14 @@ def convert_raw_subject_data_to_frame_data_dir(
 
     # ``subjects`` 是可选白名单；不传时处理目录下所有已有 raw frame PKL。
     selected = set(subjects or [])
-    input_paths = sorted(input_dir.glob("*_raw_subject_data.pkl"))
+    input_paths = sorted(input_dir.glob("*.pkl"))
     if selected:
         input_paths = [path for path in input_paths if _subject_from_input(path) in selected]
         missing = selected - {_subject_from_input(path) for path in input_paths}
         if missing:
             raise FrameDataError(f"找不到指定 subject/session：{sorted(missing)}")
     if not input_paths:
-        raise FrameDataError(f"{input_dir} 下没有 *_raw_subject_data.pkl 文件。")
+        raise FrameDataError(f"{input_dir} 下没有 pkl 文件。")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     if write_csv:
@@ -182,7 +182,7 @@ def _convert_one_worker(task: tuple[str, str, str, bool]) -> dict[str, object]:
     raw_subject_data = pd.read_pickle(input_path)
     frame_data = convert_raw_subject_data_to_frame_data(raw_subject_data)
 
-    output_path = output_dir / f"{subject}_frame_data.pkl"
+    output_path = output_dir / f"{subject}.pkl"
     frame_data.to_pickle(output_path)
     csv_path = None
     if write_csv:
@@ -477,9 +477,15 @@ def _parse_map_rewards(map_text: str) -> tuple[list[tuple[int, int]], list[tuple
 
 
 def _subject_from_input(path: Path) -> str:
-    """从 ``*_frame_data.pkl`` 文件名还原 subject/session 名。"""
+    """从 raw_subject_data 文件名还原 subject/session 名。
 
-    return path.name.removesuffix("_raw_subject_data.pkl")
+    输入语义：正式数据使用 ``{subject/session}.pkl``；旧数据可能仍带
+    ``_raw_subject_data`` 后缀。
+    输出语义：返回不含扩展名和阶段后缀的 subject/session 名。
+    关键约束：该函数只兼容读取旧文件名，新的输出始终不再写阶段后缀。
+    """
+
+    return path.stem.removesuffix("_raw_subject_data")
 
 
 def _format_result(item: dict[str, object]) -> str:

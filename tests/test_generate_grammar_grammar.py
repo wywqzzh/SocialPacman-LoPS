@@ -98,14 +98,14 @@ class GenerateGrammarCoreTest(unittest.TestCase):
         """验证核心学习流程能处理代表性真实文件并返回非空结果。"""
         # 代表性真实文件 smoke test：确保核心 learn 能处理迁移数据并返回非空结果。
         record = load_strategy_state_data(
-            STRATEGY_SEQUENCE_DIR / "031222-401.pkl",
+            STRATEGY_SEQUENCE_DIR / "031222-401-03-Dec-2022-1.pkl",
             DEFAULT_STATE_NAMES,
         )
         sequence = "".join(record.token_sequence)
         n_positions = np.where(np.array(list(sequence)) == "N")[0]
         clean_sequence = list(sequence.replace("N", ""))
         state_features = record.state_features.reset_index(drop=True).drop(n_positions).reset_index(drop=True)
-        state_dependencies = load_state_dependency_graph(STATE_GRAPH_DIR / "031222-401.pkl")
+        state_dependencies = load_state_dependency_graph(STATE_GRAPH_DIR / "031222-401-03-Dec-2022-1.pkl")
 
         learner = GrammarLearner(GrammarLearningParams())
         result = learner.learn(

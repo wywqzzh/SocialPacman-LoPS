@@ -25,7 +25,7 @@ def _build_real_condition_link_inputs() -> tuple[np.ndarray, np.ndarray, dict[in
     """
     # 该夹具不仅覆盖小数组，也覆盖默认路径真实数据下的状态条件学习行为。
     record = load_strategy_state_data(
-        STRATEGY_SEQUENCE_DIR / "031222-401.pkl",
+        STRATEGY_SEQUENCE_DIR / "031222-401-03-Dec-2022-1.pkl",
         DEFAULT_STATE_NAMES,
     )
     sequence = "".join(record.token_sequence)
@@ -53,7 +53,7 @@ def _build_real_condition_link_inputs() -> tuple[np.ndarray, np.ndarray, dict[in
     casual_num = data_policy_condition_frame.shape[1]
     effect_num = data_parent_frame.shape[1]
     block_message = {index: [index] for index in range(casual_num)}
-    graph = load_state_dependency_graph(STATE_GRAPH_DIR / "031222-401.pkl")
+    graph = load_state_dependency_graph(STATE_GRAPH_DIR / "031222-401-03-Dec-2022-1.pkl")
     return data, nstates, block_message, casual_num, len(block_message), effect_num, graph.conditions_by_state
 
 

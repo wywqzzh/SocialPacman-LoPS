@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""运行 human fMRI 集中 utility 计算阶段。"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from LoPS.calculate_utility import (  # noqa: E402
+    CalculateUtilityConfig,
+    load_calculate_utility_maps,
+    process_calculate_utility_directory,
+)
+from LoPS.hierarchical_utility import UtilityConfig  # noqa: E402
+
+
+def parse_args() -> argparse.Namespace:
+    """解析集中 utility 计算阶段的命令行参数。
+
+    输入语义：调用方可以覆盖输入目录、输出目录、常量目录、并行数和 raw Q 策略参数。
+    输出语义：返回可直接构造配置并驱动目录处理的参数对象。
+    关键约束：默认路径指向当前仓库的 data 主流程目录，不依赖旧项目路径。
+    """
+
+    data_root = PROJECT_ROOT / "data"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--input-dir",
+        type=Path,
+        default=data_root / "04_corrected_tile_data",
+        help="corrected tile 输入目录。",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=data_root / "05_utility_data",
+        help="集中 utility 输出目录。",
+    )
+    parser.add_argument(
+        "--constant-dir",
+        type=Path,
+        default=data_root / "constant_data",
+        help="包含 adjacent_map_fmri.csv 和 dij_distance_map_fmri.csv 的常量目录。",
+    )
+    parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1), help="文件级并行进程数。")
+    parser.add_argument("--randomness-coeff", type=float, default=0.0, help="Q 随机扰动系数。")
+    parser.add_argument("--laziness-coeff", type=float, default=0.0, help="沿用上一方向的惰性系数。")
+    parser.add_argument("--global-depth", type=int, default=15, help="Global 策略深度参数。")
+    parser.add_argument("--global-ignore-depth", type=int, default=10, help="Global 远距离 bean 过滤深度。")
+    parser.add_argument("--local-depth", type=int, default=10, help="Local 路径树深度。")
+    parser.add_argument("--evade-depth", type=int, default=10, help="Evade 路径树深度。")
+    parser.add_argument("--approach-depth", type=int, default=10, help="Approach 路径树深度。")
+    parser.add_argument("--energizer-depth", type=int, default=10, help="Energizer 路径树深度。")
+    parser.add_argument("--no-energizer-depth", type=int, default=8, help="NoEnergizer 路径树深度。")
+    return parser.parse_args()
+
+
+def build_config(args: argparse.Namespace) -> CalculateUtilityConfig:
+    """根据命令行参数构造集中 utility 配置。
+
+    输入语义：args 来自 ``parse_args``。
+    输出语义：返回 ``CalculateUtilityConfig``。
+    关键约束：默认随机和惰性系数为 0，保证 utility 输出可复现。
+    """
+
+    utility_config = UtilityConfig(
+        randomness_coeff=args.randomness_coeff,
+        laziness_coeff=args.laziness_coeff,
+        global_depth=args.global_depth,
+        global_ignore_depth=args.global_ignore_depth,
+        local_depth=args.local_depth,
+        evade_depth=args.evade_depth,
+        approach_depth=args.approach_depth,
+        energizer_depth=args.energizer_depth,
+        no_energizer_depth=args.no_energizer_depth,
+    )
+    return CalculateUtilityConfig(utility_config=utility_config)
+
+
+def main() -> None:
+    """命令行入口：批量生成集中 utility 数据并打印 JSON 摘要。"""
+
+    args = parse_args()
+    map_data, adjacent_map = load_calculate_utility_maps(args.constant_dir)
+    summaries = process_calculate_utility_directory(
+        input_dir=args.input_dir,
+        output_dir=args.output_dir,
+        map_data=map_data,
+        adjacent_map=adjacent_map,
+        config=build_config(args),
+        workers=args.workers,
+    )
+    print(
+        json.dumps(
+            {
+                "processed_files": len(summaries),
+                "total_input_rows": sum(item["input_rows"] for item in summaries),
+                "total_output_rows": sum(item["output_rows"] for item in summaries),
+                "total_changed_cells": sum(item["changed_cells"] for item in summaries),
+                "dropped_trials": {
+                    item["input_file"]: item["dropped_trials"]
+                    for item in summaries
+                    if item["dropped_trials"]
+                },
+                "output_dir": str(args.output_dir),
+                "workers": args.workers,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

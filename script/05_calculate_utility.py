@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""运行 human fMRI 集中 utility 计算阶段。"""
+"""运行 Social Pacman 集中 utility 计算阶段。"""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
         "--constant-dir",
         type=Path,
         default=data_root / "constant_data",
-        help="包含 adjacent_map_fmri.csv 和 dij_distance_map_fmri.csv 的常量目录。",
+        help="包含 map_constants.pkl 的常量目录。",
     )
     parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1), help="文件级并行进程数。")
     parser.add_argument("--randomness-coeff", type=float, default=0.0, help="Q 随机扰动系数。")
@@ -106,11 +106,7 @@ def main() -> None:
                 "total_input_rows": sum(item["input_rows"] for item in summaries),
                 "total_output_rows": sum(item["output_rows"] for item in summaries),
                 "total_changed_cells": sum(item["changed_cells"] for item in summaries),
-                "dropped_trials": {
-                    item["input_file"]: item["dropped_trials"]
-                    for item in summaries
-                    if item["dropped_trials"]
-                },
+                "players": summarize_players(summaries),
                 "output_dir": str(args.output_dir),
                 "workers": args.workers,
             },
@@ -118,6 +114,36 @@ def main() -> None:
             indent=2,
         )
     )
+
+
+def summarize_players(summaries: list[dict[str, object]]) -> dict[str, dict[str, int]]:
+    """汇总每个玩家在 05 阶段的计算行数。
+
+    输入语义：summaries 来自 ``process_calculate_utility_directory``。
+    输出语义：返回以玩家前缀为键的总行数、计算行数、跳过行数和 Q 修正单元数。
+    关键约束：该摘要只用于命令行日志，不影响任何保存数据。
+    """
+
+    result: dict[str, dict[str, int]] = {}
+    for summary in summaries:
+        players = summary.get("players", {})
+        if not isinstance(players, dict):
+            continue
+        for player, player_summary in players.items():
+            if not isinstance(player_summary, dict):
+                continue
+            accumulator = result.setdefault(
+                str(player),
+                {
+                    "input_rows": 0,
+                    "computed_rows": 0,
+                    "skipped_rows": 0,
+                    "changed_cells": 0,
+                },
+            )
+            for key in accumulator:
+                accumulator[key] += int(player_summary.get(key, 0))
+    return result
 
 
 if __name__ == "__main__":

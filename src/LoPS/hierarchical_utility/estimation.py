@@ -143,18 +143,15 @@ def process_utility_directory(
 
 
 def load_map_data_from_directory(constant_dir: str | Path) -> MapData:
-    """从常量目录读取 fMRI utility 需要的地图数据。
+    """从常量目录读取 utility 需要的地图数据。
 
-    输入语义：constant_dir 必须包含 adjacent 和 distance 两个 fMRI csv 文件。
+    输入语义：constant_dir 必须包含当前项目生成的 `map_constants.pkl`。
     输出语义：返回 `MapData`。
-    关键约束：该函数只拼接当前功能的文件名，不引入任何旧项目路径。
+    关键约束：该函数只拼接当前功能的文件名，不读取旧 CSV，也不做地图补丁。
     """
 
     constant_dir = Path(constant_dir)
-    return load_map_data(
-        constant_dir / "adjacent_map_fmri.csv",
-        constant_dir / "dij_distance_map_fmri.csv",
-    )
+    return load_map_data(constant_dir / "map_constants.pkl")
 
 
 def _process_utility_task(task: tuple[Path, Path, MapData, UtilityConfig]) -> dict[str, Any]:

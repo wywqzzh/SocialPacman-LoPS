@@ -1,9 +1,9 @@
-"""human fMRI utility 的集中计算、修正和归一化流程。
+"""Social Pacman utility 的集中计算、修正和归一化流程。
 
-本模块把原先分散在 hierarchical utility、correct utility 和 dynamic
-strategy fitting 中的 Q 值处理集中到同一个阶段。输出数据已经包含拟合
-阶段需要的 ``*_Q``、``*_Q_norm``、``row_id``、``DayTrial``、``game_id``、
-``action_dir`` 和 ``available_dir`` 字段，后续拟合模块只负责使用这些字段。
+本模块为 corrected tile 数据中的每个玩家分别计算七个旧 hierarchical utility
+策略的 Q 值。输入是一行保存公共状态与多个玩家状态的 joint-state 表，输出仍
+保持一行 joint-state，只新增 ``p1_*_Q``、``p1_*_Q_norm``、``p2_*_Q`` 等玩家
+前缀字段，避免破坏合作/竞争分析需要的同一时刻对齐关系。
 """
 
 from __future__ import annotations
@@ -23,12 +23,14 @@ from LoPS.hierarchical_utility import (
     MapData,
     UtilityConfig,
     estimate_utility_for_dataframe,
+    load_map_data,
     load_map_data_from_directory,
 )
 
 
 DIRECTION_NAMES: tuple[str, ...] = ("left", "right", "up", "down")
 Q_NORM_COLUMNS: tuple[str, ...] = tuple(f"{column}_norm" for column in Q_COLUMNS)
+PLAYER_PREFIXES: tuple[str, ...] = ("p1", "p2")
 PARSED_POSITION_COLUMNS: tuple[str, ...] = (
     "pacmanPos",
     "ghost1Pos",
@@ -79,29 +81,15 @@ def parse_position(value: Any) -> tuple[int, int]:
 
 
 def load_adjacent_map(path: str | Path) -> dict[tuple[int, int], dict[str, tuple[int, int] | float]]:
-    """读取 fMRI 迷宫邻接表。
+    """从统一地图常量 pickle 读取邻接表。
 
-    输入语义：path 指向包含 ``pos/left/right/up/down`` 列的 CSV。
+    输入语义：path 指向 ``script/constant_map/generate_map_constants.py`` 生成的
+    ``map_constants.pkl``。
     输出语义：返回位置到四方向相邻位置的字典，不可走方向用 ``np.nan`` 表示。
-    关键约束：显式保留旧流程对 tunnel 两端的邻接补丁。
+    关键约束：地图连通性只以 pkl 内容为准，本函数不再补充或覆盖任何方向。
     """
 
-    adjacent_frame = pd.read_csv(path)
-    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]] = {}
-    for _, row in adjacent_frame.iterrows():
-        position = parse_position(row["pos"])
-        adjacent_map[position] = {}
-        for direction in DIRECTION_NAMES:
-            value = row[direction]
-            # pandas 会把 CSV 空单元读成 NaN；这里用 float/NaN 表示墙方向。
-            adjacent_map[position][direction] = np.nan if pd.isna(value) else parse_position(value)
-
-    # tunnel 两端在旧工具函数中被额外修正；即使 CSV 内容变化，也以该规则为准。
-    adjacent_map.setdefault((0, 18), {})
-    adjacent_map.setdefault((30, 18), {})
-    adjacent_map[(0, 18)].update({"left": (30, 18), "right": (1, 18), "up": np.nan, "down": np.nan})
-    adjacent_map[(30, 18)].update({"left": (29, 18), "right": (0, 18), "up": np.nan, "down": np.nan})
-    return adjacent_map
+    return load_map_data(path).adjacent_by_position
 
 
 def load_calculate_utility_maps(
@@ -109,28 +97,14 @@ def load_calculate_utility_maps(
 ) -> tuple[MapData, dict[tuple[int, int], dict[str, tuple[int, int] | float]]]:
     """读取集中 utility 阶段需要的全部地图常量。
 
-    输入语义：constant_dir 包含 ``adjacent_map_fmri.csv`` 和 ``dij_distance_map_fmri.csv``。
+    输入语义：constant_dir 包含 ``map_constants.pkl``。
     输出语义：返回 raw Q 计算使用的 MapData，以及修正/归一化使用的邻接表。
-    关键约束：所有路径由调用方显式传入，本模块不内置项目数据目录。
+    关键约束：地图内容只从统一 pkl 读取，读取后不再做任何地图信息修正。
     """
 
     constant_dir = Path(constant_dir)
-    return load_map_data_from_directory(constant_dir), load_adjacent_map(constant_dir / "adjacent_map_fmri.csv")
-
-
-def normalize_tunnel_position(position: tuple[int, int]) -> tuple[int, int]:
-    """把 tunnel 边界位置映射到归一化逻辑使用的内部格子。
-
-    输入语义：position 是 Pacman 当前坐标。
-    输出语义：返回用于查邻接表的坐标。
-    关键约束：该规则来自当前拟合阶段的历史实现，影响 ``evade`` 类 Q 的可走方向选择。
-    """
-
-    if position in {(-1, 18), (0, 18)}:
-        return (1, 18)
-    if position in {(31, 18), (30, 18)}:
-        return (29, 18)
-    return position
+    map_data = load_map_data_from_directory(constant_dir)
+    return map_data, map_data.adjacent_by_position
 
 
 def correct_unavailable_q_values(
@@ -214,10 +188,9 @@ def make_evade_q_non_negative(
     关键约束：该函数会原地修改 q_values；这是为了复现当前 weight_data 中保存的 raw Q。
     """
 
-    normalized_position = normalize_tunnel_position(position)
     available_indices: list[int] = []
     for direction in DIRECTION_NAMES:
-        adjacent_value = adjacent_map[normalized_position][direction]
+        adjacent_value = adjacent_map[position][direction]
         if adjacent_value is not None and not isinstance(adjacent_value, float):
             available_indices.append(DIRECTION_NAMES.index(direction))
     q_values[available_indices] = q_values[available_indices] - offset
@@ -225,29 +198,25 @@ def make_evade_q_non_negative(
 
 
 def prepare_standard_analysis_columns(data: pd.DataFrame) -> pd.DataFrame:
-    """校验并整理拟合阶段需要的标准分析字段。
+    """校验并整理单个玩家视角的 utility 临时表。
 
-    输入语义：data 是修正后的 utility DataFrame，必须已经包含
-    ``DayTrial/game_id/action_dir/available_dir``。
-    输出语义：返回按 DayTrial 首次出现顺序整理后的 DataFrame。
-    关键约束：action_dir 已在 human_tile_data_preprocess 中按 corrected tile 行序生成；
-    本阶段不能再根据 arrive direction 或 shift 重新计算动作。
+    输入语义：data 是从 joint-state 表中抽出的单玩家视角表，必须包含
+    ``DayTrial/pacmanPos/action_dir/available_dir``。
+    输出语义：返回行顺序不变、位置和方向字段已整理的 DataFrame。
+    关键约束：本阶段不能删除或重排 joint 行，否则会破坏两个玩家之间的时间对齐。
     """
 
-    required_columns = {"DayTrial", "game_id", "action_dir", "available_dir"}
+    required_columns = {"DayTrial", "pacmanPos", "action_dir", "available_dir"}
     missing_columns = sorted(required_columns - set(data.columns))
     if missing_columns:
         raise ValueError(f"计算 utility 缺少标准分析字段：{missing_columns}")
 
-    # 旧拟合脚本先按 DayTrial 首次出现顺序重组，使同一 trial 行连续。
-    day_trials = data.DayTrial.unique()
-    result = pd.concat([data[data.DayTrial == day_trial] for day_trial in day_trials]).reset_index(drop=True)
-
+    result = data.reset_index(drop=True).copy()
     for column in PARSED_POSITION_COLUMNS:
         if column in result.columns:
             result[column] = result[column].apply(parse_literal_if_needed)
 
-    # action_dir 缺失统一用 NaN 表示，便于后续判断无动作 trial。
+    # action_dir 缺失统一用 NaN 表示；是否过滤无动作行交给后续拟合阶段按玩家决定。
     result["action_dir"] = result["action_dir"].apply(lambda value: value if value is not None else np.nan)
     result["available_dir"] = result["available_dir"].astype(bool)
     return result
@@ -306,34 +275,12 @@ def restore_standard_input_columns(estimated_utility: pd.DataFrame, standard_inp
     return result
 
 
-def drop_no_move_trials(data: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    """删除完全没有移动方向的 trial。
-
-    输入语义：data 已包含 ``DayTrial`` 和 ``action_dir``。
-    输出语义：返回过滤后的 DataFrame 以及被删除的 trial 名称。
-    关键约束：沿用旧拟合逻辑，方向列全是 float/NaN 的 trial 不参与拟合。
-    """
-
-    trial_records: list[pd.DataFrame] = []
-    dropped_trials: list[str] = []
-    for trial_name in np.unique(data.DayTrial.values):
-        trial_data = data[data.DayTrial == trial_name]
-        pacman_direction = trial_data.action_dir
-        if np.sum(pacman_direction.apply(lambda value: isinstance(value, float))) == len(pacman_direction):
-            dropped_trials.append(str(trial_name))
-            continue
-        trial_records.append(trial_data)
-    if not trial_records:
-        raise ValueError("所有 trial 都没有可用移动方向，无法生成拟合用 utility 数据。")
-    return pd.concat(trial_records).reset_index(drop=True), dropped_trials
-
-
 def add_row_id(data: pd.DataFrame) -> pd.DataFrame:
-    """为拟合输入生成稳定行号 row_id。
+    """为 utility 输出生成稳定行号 row_id。
 
-    输入语义：data 已完成无动作 trial 删除和最终行顺序整理。
+    输入语义：data 是保持 joint-state 行序的输出表。
     输出语义：返回首列为 ``row_id`` 的 DataFrame。
-    关键约束：row_id 替代旧拟合输出中的 ``level_0`` 和 ``index``，不承载 frame id 语义。
+    关键约束：row_id 只表示当前文件内的输出行号，不承载原始 frame id 语义。
     """
 
     result = data.copy(deep=True)
@@ -349,9 +296,10 @@ def append_normalized_q_columns(
 ) -> pd.DataFrame:
     """为修正后的 ``*_Q`` 追加 ``*_Q_norm`` 字段。
 
-    输入语义：data 已经过不可走方向修正，并完成标准字段整理。
+    输入语义：data 是单玩家视角表，已经过不可走方向修正，并完成标准字段整理。
     输出语义：返回追加 Q_norm 后的 DataFrame。
-    关键约束：evade/no_energizer 类字段会按列级最小有限值平移，并同步修改 raw Q。
+    关键约束：evade/no_energizer 类字段会在当前玩家内按列级最小有限值平移；
+    p1 和 p2 分开调用该函数，因此归一化尺度互不影响。
     """
 
     result = data.copy(deep=True)
@@ -377,18 +325,136 @@ def append_normalized_q_columns(
 def prepare_calculated_utility_dataframe(
     corrected_utility: pd.DataFrame,
     adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
-) -> tuple[pd.DataFrame, list[str]]:
-    """把修正后的 utility 表整理成拟合可直接读取的数据。
+) -> pd.DataFrame:
+    """把单玩家视角的修正后 utility 表整理成可写回 joint-state 的结果。
 
     输入语义：corrected_utility 已包含修正后的 raw ``*_Q`` 字段。
-    输出语义：返回包含 ``row_id/*_Q_norm`` 的 DataFrame 和删除的 trial。
-    关键约束：该函数复现原拟合阶段中会影响 Q_norm 的全部前置数据整理。
+    输出语义：返回追加 ``*_Q_norm`` 后的单玩家视角 DataFrame。
+    关键约束：不删除无动作 trial，也不改变行数；玩家级过滤留给后续拟合阶段。
     """
 
     prepared = prepare_standard_analysis_columns(corrected_utility)
-    prepared, dropped_trials = drop_no_move_trials(prepared)
-    prepared = append_normalized_q_columns(prepared, adjacent_map)
-    return add_row_id(prepared), dropped_trials
+    return append_normalized_q_columns(prepared, adjacent_map)
+
+
+def discover_player_prefixes(data: pd.DataFrame) -> list[str]:
+    """识别当前文件中实际存在的玩家字段前缀。
+
+    输入语义：data 是 04 corrected tile 输出的 joint-state 表。
+    输出语义：返回存在完整 ``<player>_pos/action_dir/available_dir`` 字段的玩家前缀。
+    关键约束：未来单人数据如果没有 ``p2_*`` 列，会自然跳过 p2，不生成 p2 Q 字段。
+    """
+
+    players: list[str] = []
+    for player in PLAYER_PREFIXES:
+        required_columns = {
+            f"{player}_pos",
+            f"{player}_action_dir",
+            f"{player}_available_dir",
+        }
+        if required_columns.isdisjoint(data.columns):
+            continue
+        missing_columns = sorted(required_columns - set(data.columns))
+        if missing_columns:
+            raise ValueError(f"{player} 玩家字段不完整，缺少：{missing_columns}")
+        players.append(player)
+    if not players:
+        raise ValueError("未找到任何玩家字段，至少需要 p1_pos/p1_action_dir/p1_available_dir。")
+    return players
+
+
+def build_player_alive_mask(data: pd.DataFrame, player: str) -> pd.Series:
+    """构造某个玩家需要计算 Q 的行掩码。
+
+    输入语义：data 是 joint-state 表，player 是 ``p1`` 或 ``p2``。
+    输出语义：返回布尔 Series，True 表示该行玩家处于可计算状态。
+    关键约束：死亡行仍保留在最终输出中，但该玩家的 Q 字段写为 NaN。
+    """
+
+    position_column = f"{player}_pos"
+    mask = data[position_column].notna()
+    alive_column = f"{player}_alive"
+    if alive_column in data.columns:
+        mask &= data[alive_column].astype(bool)
+    return mask
+
+
+def build_player_view(data: pd.DataFrame, player: str, row_mask: pd.Series) -> pd.DataFrame:
+    """把 joint-state 表转换为单个玩家的临时 utility 输入表。
+
+    输入语义：data 是完整 joint-state 表，row_mask 指明需要计算 Q 的行。
+    输出语义：返回只包含可计算行的 DataFrame，其中玩家字段被映射为旧估计器使用的
+    ``pacmanPos/action_dir/available_dir``。
+    关键约束：该表只在 05 内部使用，保存结果时会改回玩家前缀字段。
+    """
+
+    view = data.loc[row_mask].copy()
+    view["pacmanPos"] = view[f"{player}_pos"]
+    view["action_dir"] = view[f"{player}_action_dir"]
+    view["available_dir"] = view[f"{player}_available_dir"]
+    return view
+
+
+def prefixed_q_columns(player: str) -> list[str]:
+    """返回某个玩家在输出表中对应的全部 Q 字段名。
+
+    输入语义：player 是 ``p1`` 或 ``p2``。
+    输出语义：返回 raw Q 和 Q_norm 的玩家前缀字段名。
+    关键约束：字段顺序固定为 raw Q 在前、norm Q 在后，便于人工检查输出。
+    """
+
+    return [f"{player}_{column}" for column in (*Q_COLUMNS, *Q_NORM_COLUMNS)]
+
+
+def calculate_player_utility(
+    frame_data: pd.DataFrame,
+    player: str,
+    map_data: MapData,
+    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
+    config: CalculateUtilityConfig,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """为 joint-state 表中的单个玩家计算七个策略 Q。
+
+    输入语义：frame_data 是完整 joint-state 表，player 指定要计算的玩家。
+    输出语义：返回只包含 ``<player>_*_Q`` 字段的 DataFrame，以及该玩家的处理摘要。
+    关键约束：死亡行和缺失玩家位置行不进入 Q 估计器，但会在返回表中保留 NaN。
+    """
+
+    row_mask = build_player_alive_mask(frame_data, player)
+    output = pd.DataFrame(index=frame_data.index)
+    for column in prefixed_q_columns(player):
+        output[column] = pd.Series([np.nan] * len(frame_data), index=frame_data.index, dtype=object)
+
+    if not row_mask.any():
+        return output, {
+            "input_rows": int(frame_data.shape[0]),
+            "computed_rows": 0,
+            "skipped_rows": int((~row_mask).sum()),
+            "changed_cells": 0,
+        }
+
+    player_view = build_player_view(frame_data, player, row_mask)
+    # Q 估计器内部仍需要少量历史输入语义；这些临时字段不会写入正式输出。
+    utility_input = build_utility_estimation_input(player_view)
+    raw_utility = estimate_utility_for_dataframe(utility_input, map_data, config.utility_config)
+    raw_utility.drop(columns=["pacman_dir"], inplace=True, errors="ignore")
+    raw_utility = restore_standard_input_columns(raw_utility, player_view)
+    corrected_utility, changed_cells = correct_unavailable_q_values(raw_utility, adjacent_map)
+    calculated_utility = prepare_calculated_utility_dataframe(corrected_utility, adjacent_map)
+
+    target_indices = frame_data.index[row_mask]
+    for source_column in (*Q_COLUMNS, *Q_NORM_COLUMNS):
+        target_column = f"{player}_{source_column}"
+        # calculated_utility 已 reset index，因此这里按顺序写回原 joint 行。
+        for target_index, value in zip(target_indices, calculated_utility[source_column].to_numpy()):
+            output.at[target_index, target_column] = value
+
+    return output, {
+        "input_rows": int(frame_data.shape[0]),
+        "computed_rows": int(row_mask.sum()),
+        "skipped_rows": int((~row_mask).sum()),
+        "changed_cells": int(changed_cells),
+    }
 
 
 def calculate_utility_for_dataframe(
@@ -397,29 +463,39 @@ def calculate_utility_for_dataframe(
     adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
     config: CalculateUtilityConfig | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """对单个 corrected tile DataFrame 执行完整 utility 计算。
+    """对单个 corrected tile joint-state DataFrame 执行完整 utility 计算。
 
-    输入语义：frame_data 是 human_tile_data_preprocess 之后的单被试数据。
-    输出语义：返回拟合可直接消费的 utility DataFrame 和处理摘要。
-    关键约束：raw Q 计算、不可走方向修正和 Q_norm 生成在同一个文件内顺序完成。
+    输入语义：frame_data 是 04 corrected tile 输出，包含公共状态和一个或两个玩家状态。
+    输出语义：返回原 joint-state 字段加玩家前缀 Q 字段的 DataFrame 和处理摘要。
+    关键约束：不拆文件、不展开成长表、不删除 joint 行，确保合作/竞争状态对齐。
     """
 
     config = CalculateUtilityConfig() if config is None else config
-    # Q 估计器内部仍需要少量历史输入语义；这些临时字段不会写入正式输出。
-    utility_input = build_utility_estimation_input(frame_data)
-    raw_utility = estimate_utility_for_dataframe(utility_input, map_data, config.utility_config)
-    raw_utility.drop(columns=["pacman_dir"], inplace=True)
-    raw_utility = restore_standard_input_columns(raw_utility, frame_data)
-    corrected_utility, changed_cells = correct_unavailable_q_values(raw_utility, adjacent_map)
-    calculated_utility, dropped_trials = prepare_calculated_utility_dataframe(corrected_utility, adjacent_map)
+    result = add_row_id(frame_data.reset_index(drop=True))
+    player_summaries: dict[str, dict[str, Any]] = {}
+    changed_cells = 0
+
+    for player in discover_player_prefixes(frame_data):
+        player_output, player_summary = calculate_player_utility(
+            frame_data=frame_data,
+            player=player,
+            map_data=map_data,
+            adjacent_map=adjacent_map,
+            config=config,
+        )
+        player_summaries[player] = player_summary
+        changed_cells += int(player_summary["changed_cells"])
+        for column in player_output.columns:
+            result[column] = player_output[column].to_numpy()
+
     summary = {
         "input_rows": int(frame_data.shape[0]),
-        "output_rows": int(calculated_utility.shape[0]),
+        "output_rows": int(result.shape[0]),
         "changed_cells": int(changed_cells),
-        "dropped_trials": dropped_trials,
-        "column_count": int(calculated_utility.shape[1]),
+        "players": player_summaries,
+        "column_count": int(result.shape[1]),
     }
-    return calculated_utility, summary
+    return result, summary
 
 
 def process_calculate_utility_file(
@@ -445,8 +521,8 @@ def process_calculate_utility_file(
     with output_path.open("wb") as file:
         pickle.dump(calculated_utility, file)
     return {
-        "input_file": input_path.name,
-        "output_file": output_path.name,
+        "input_file": str(input_path),
+        "output_file": str(output_path),
         **summary,
     }
 
@@ -459,11 +535,11 @@ def process_calculate_utility_directory(
     config: CalculateUtilityConfig | None = None,
     workers: int = 1,
 ) -> list[dict[str, Any]]:
-    """批量处理 corrected tile 目录并生成集中 utility 数据。
+    """批量处理 corrected tile 嵌套目录并生成集中 utility 数据。
 
-    输入语义：input_dir 是扁平 `.pkl` 输入目录，output_dir 是集中 utility 输出目录。
-    输出语义：每个输入文件写出同名 pickle，返回文件摘要列表。
-    关键约束：文件之间没有状态共享；排序只用于稳定输出和 seed 无关的验证。
+    输入语义：input_dir 是包含 ``comp/*.pkl``、``coop/*.pkl`` 等任务子目录的目录。
+    输出语义：每个输入文件按相同相对路径写到 output_dir，返回文件摘要列表。
+    关键约束：只支持当前主流程的嵌套结构，不再兼容旧扁平目录。
     """
 
     input_dir = Path(input_dir)
@@ -471,12 +547,15 @@ def process_calculate_utility_directory(
     config = CalculateUtilityConfig() if config is None else config
     if not input_dir.is_dir():
         raise FileNotFoundError(f"输入目录不存在：{input_dir}")
-    input_paths = sorted(input_dir.glob("*.pkl"))
+    input_paths = sorted(path for path in input_dir.glob("*/*.pkl") if path.is_file())
     if not input_paths:
-        raise FileNotFoundError(f"输入目录中没有 pickle 文件：{input_dir}")
+        raise FileNotFoundError(f"输入目录中没有嵌套 pickle 文件：{input_dir}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    tasks = [(input_path, output_dir / input_path.name, map_data, adjacent_map, config) for input_path in input_paths]
+    tasks = [
+        (input_path, output_dir / input_path.relative_to(input_dir), map_data, adjacent_map, config)
+        for input_path in input_paths
+    ]
     if workers <= 1:
         return [_process_calculate_utility_task(task) for task in tasks]
     with ProcessPoolExecutor(max_workers=min(workers, len(tasks))) as executor:

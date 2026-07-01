@@ -14,26 +14,17 @@ import pandas as pd
 DIRECTIONS: tuple[str, str, str, str] = ("left", "right", "up", "down")
 DIRECTION_TO_INDEX = {direction: index for index, direction in enumerate(DIRECTIONS)}
 GHOST_NAMES: tuple[str, str] = ("blinky", "clyde")
-PACMAN_TUNNEL_FIXES = {
-    (0, 18): (1, 18),
-    (-1, 18): (1, 18),
-    (30, 18): (29, 18),
-    (31, 18): (29, 18),
-}
-GHOST_POSITION_FIXES = {
-    (14, 20): (14, 19),
-    (15, 20): (15, 19),
-    (16, 20): (16, 19),
-}
 
 
 @dataclass(frozen=True)
 class MapData:
     """保存 utility 计算所需的 Pacman 地图常量。
 
-    输入语义：由 adjacent map 和 Dijkstra distance map 两个 csv 解析得到。
+    输入语义：由 `script/constant_map/generate_map_constants.py` 生成的
+    `map_constants.pkl` 解析得到。
     输出语义：策略计算时通过位置 tuple 查询四方向相邻位置和任意两点距离。
-    关键约束：该结构只保存正式计算需要的数据，不包含旧脚本中未使用的 adjacent path。
+    关键约束：该结构只保存正式计算需要的数据；所有地图连通性修正都必须已经在
+    地图常量生成阶段完成，读取阶段不再补边或改写距离。
     """
 
     adjacent_by_position: dict[tuple[int, int], dict[str, Any]]
@@ -123,17 +114,18 @@ class CompiledFrameState:
     last_direction_id: int | None
 
 
-def load_map_data(adjacent_map_path: str | Path, distance_map_path: str | Path) -> MapData:
+def load_map_data(map_constants_path: str | Path) -> MapData:
     """读取地图相邻关系、距离表和奖励常量。
 
-    输入语义：adjacent_map_path 指向 `adjacent_map_fmri.csv`，distance_map_path
-    指向 `dij_distance_map_fmri.csv`。
+    输入语义：map_constants_path 指向当前项目生成的 `map_constants.pkl`。
     输出语义：返回可被所有策略复用的 `MapData`。
-    关键约束：保留旧 fMRI 地图对 tunnel 两端相邻关系和距离的手动修正。
+    关键约束：本函数只读取和转换 pkl 中已有的地图常量，不再进行 tunnel、
+    鬼屋或其它坐标连通性的读取后修正。
     """
 
-    adjacent_by_position = _read_adjacent_map(Path(adjacent_map_path))
-    distance_by_position = _read_distance_map(Path(distance_map_path))
+    map_constants = _read_map_constants(Path(map_constants_path))
+    adjacent_by_position = _read_adjacent_map(map_constants["adjacent_map"])
+    distance_by_position = _read_distance_map(map_constants["dij_distance_map"])
     reward_amount = {
         1: 2,
         2: 4,
@@ -217,13 +209,10 @@ def parse_frame_state(row: pd.Series, columns: pd.Index | list[str] | tuple[str,
     """
 
     column_set = set(columns)
-    pacman_position = _normalize_pacman_position(_parse_required_position(row["pacmanPos"]))
+    pacman_position = _parse_required_position(row["pacmanPos"])
     energizers = _parse_position_list(row["energizers"])
     beans = _parse_position_list(row["beans"])
-    ghost_positions = [
-        _normalize_ghost_position(_parse_optional_ghost_position(row[f"ghost{index}Pos"]))
-        for index in range(1, 3)
-    ]
+    ghost_positions = [_parse_optional_ghost_position(row[f"ghost{index}Pos"]) for index in range(1, 3)]
 
     if "ghost1_status" in column_set or "ghost2_status" in column_set:
         ghost_status = [row["ghost1_status"], row["ghost2_status"]]
@@ -246,53 +235,73 @@ def parse_frame_state(row: pd.Series, columns: pd.Index | list[str] | tuple[str,
     )
 
 
-def _read_adjacent_map(path: Path) -> dict[tuple[int, int], dict[str, Any]]:
-    """读取 fMRI 地图四方向相邻关系。
+def _read_map_constants(path: Path) -> dict[str, pd.DataFrame]:
+    """读取统一地图常量 pickle 并校验基本结构。
 
-    输入语义：path 是包含 `pos/left/right/up/down` 列的 csv。
-    输出语义：返回以位置 tuple 为键、四方向为二级键的相邻关系字典。
-    关键约束：NaN 墙体保持为浮点 NaN，以复现旧代码的 `isinstance(value, float)` 判断。
+    输入语义：path 指向 `data/constant_data/map_constants.pkl` 或同结构文件。
+    输出语义：返回包含 `adjacent_map` 和 `dij_distance_map` 两张 DataFrame 的字典。
+    关键约束：该函数只负责加载和结构校验，不对地图内容做任何补丁。
     """
 
-    adjacent_data = pd.read_csv(path)
-    for column in ("pos", *DIRECTIONS):
-        adjacent_data[column] = adjacent_data[column].apply(_literal_eval_unless_float)
+    if not path.is_file():
+        raise FileNotFoundError(f"找不到地图常量文件：{path}")
+
+    constants = pd.read_pickle(path)
+    if not isinstance(constants, dict):
+        raise TypeError(f"地图常量文件应保存为 dict：{path}")
+
+    required_keys = {"adjacent_map", "dij_distance_map"}
+    missing_keys = sorted(required_keys - set(constants))
+    if missing_keys:
+        raise KeyError(f"地图常量文件缺少字段：{missing_keys}")
+
+    for key in required_keys:
+        if not isinstance(constants[key], pd.DataFrame):
+            raise TypeError(f"地图常量 {key} 应为 DataFrame，实际为 {type(constants[key]).__name__}")
+    return constants
+
+
+def _read_adjacent_map(adjacent_data: pd.DataFrame) -> dict[tuple[int, int], dict[str, Any]]:
+    """从统一地图常量表读取四方向相邻关系。
+
+    输入语义：adjacent_data 是 `map_constants.pkl` 中的 `adjacent_map` DataFrame。
+    输出语义：返回以位置 tuple 为键、四方向为二级键的相邻关系字典。
+    关键约束：NaN 墙体保持为浮点 NaN；读取阶段不再新增 tunnel 边或改写方向。
+    """
+
+    required_columns = {"pos", *DIRECTIONS}
+    missing_columns = sorted(required_columns - set(adjacent_data.columns))
+    if missing_columns:
+        raise KeyError(f"adjacent_map 缺少列：{missing_columns}")
 
     adjacent_by_position: dict[tuple[int, int], dict[str, Any]] = {}
     for _, item in adjacent_data.iterrows():
-        position = tuple(item["pos"])
-        adjacent_by_position[position] = {direction: item[direction] for direction in DIRECTIONS}
-
-    # fMRI 地图 tunnel 两端在旧辅助函数中手动补齐，这里保留同一张图结构。
-    adjacent_by_position.setdefault((0, 18), {})
-    adjacent_by_position.setdefault((30, 18), {})
-    adjacent_by_position[(0, 18)].update({"left": (30, 18), "right": (1, 18), "up": np.nan, "down": np.nan})
-    adjacent_by_position[(30, 18)].update({"left": (29, 18), "right": (0, 18), "up": np.nan, "down": np.nan})
+        position = _coerce_position(item["pos"])
+        adjacent_by_position[position] = {
+            direction: np.nan if _is_float_marker(item[direction]) else _coerce_position(item[direction])
+            for direction in DIRECTIONS
+        }
     return adjacent_by_position
 
 
-def _read_distance_map(path: Path) -> dict[tuple[int, int], dict[tuple[int, int], int | float]]:
-    """读取 fMRI 地图任意两点的最短距离。
+def _read_distance_map(distance_data: pd.DataFrame) -> dict[tuple[int, int], dict[tuple[int, int], int | float]]:
+    """从统一地图常量表读取任意两点的最短距离。
 
-    输入语义：path 是包含 `pos1/pos2/dis` 列的 Dijkstra distance csv。
+    输入语义：distance_data 是 `map_constants.pkl` 中的 `dij_distance_map` DataFrame。
     输出语义：返回 `distance_by_position[pos1][pos2] = dis` 的嵌套字典。
-    关键约束：保留旧辅助函数对 tunnel 两端距离的手动修正。
+    关键约束：距离表必须来自地图常量生成阶段；读取阶段不再手动补充距离。
     """
 
-    distance_data = pd.read_csv(path)[["pos1", "pos2", "dis"]]
-    distance_data["pos1"] = distance_data["pos1"].apply(ast.literal_eval)
-    distance_data["pos2"] = distance_data["pos2"].apply(ast.literal_eval)
+    required_columns = {"pos1", "pos2", "dis"}
+    missing_columns = sorted(required_columns - set(distance_data.columns))
+    if missing_columns:
+        raise KeyError(f"dij_distance_map 缺少列：{missing_columns}")
 
     distance_by_position: dict[tuple[int, int], dict[tuple[int, int], int | float]] = {}
     for _, item in distance_data.iterrows():
-        pos1 = tuple(item["pos1"])
-        pos2 = tuple(item["pos2"])
+        pos1 = _coerce_position(item["pos1"])
+        pos2 = _coerce_position(item["pos2"])
         distance_by_position.setdefault(pos1, {})[pos2] = item["dis"]
-
-    distance_by_position[(0, 18)][(30, 18)] = 1
-    distance_by_position[(0, 18)][(1, 18)] = 1
-    distance_by_position[(30, 18)][(0, 18)] = 1
-    distance_by_position[(30, 18)][(29, 18)] = 1
     return distance_by_position
 
 
@@ -366,17 +375,18 @@ def _positions_to_mask(value: list[tuple[int, int]] | float, position_to_id: dic
     return mask
 
 
-def _literal_eval_unless_float(value: Any) -> Any:
-    """解析非浮点字符串字面量。
+def _coerce_position(value: Any) -> tuple[int, int]:
+    """把地图常量中的位置值转换为标准整数 tuple。
 
-    输入语义：value 来自 csv 单元格，墙体通常是 NaN 浮点数。
-    输出语义：浮点值原样返回，其它值用 `ast.literal_eval` 解析。
-    关键约束：不使用 `eval`，但保留 NaN 作为浮点缺失标记。
+    输入语义：value 来自 `map_constants.pkl`，通常已经是 tuple，也兼容字符串形式。
+    输出语义：返回 `(x, y)` 整数坐标。
+    关键约束：该函数只做类型转换，不改变坐标含义，也不执行任何地图修正。
     """
 
-    if _is_float_marker(value):
-        return value
-    return ast.literal_eval(str(value))
+    parsed = ast.literal_eval(value) if isinstance(value, str) else value
+    if not isinstance(parsed, (tuple, list)) or len(parsed) != 2:
+        raise ValueError(f"无法解析地图坐标：{value!r}")
+    return int(parsed[0]), int(parsed[1])
 
 
 def _parse_required_position(value: Any) -> tuple[int, int]:
@@ -419,34 +429,10 @@ def _parse_position_list(value: Any) -> list[tuple[int, int]] | float:
     return [tuple(item) for item in parsed]
 
 
-def _normalize_pacman_position(position: tuple[int, int]) -> tuple[int, int]:
-    """修正 fMRI tunnel 中 Pacman 的边界坐标。
-
-    输入语义：position 是解析后的 Pacman 坐标。
-    输出语义：返回旧脚本用于策略计算的内部坐标。
-    关键约束：只处理旧 fMRI 脚本明确写出的四个 tunnel 入口坐标。
-    """
-
-    return PACMAN_TUNNEL_FIXES.get(position, position)
-
-
-def _normalize_ghost_position(position: tuple[int, int] | tuple[()]) -> tuple[int, int] | tuple[()]:
-    """修正 fMRI 地图中鬼出生在墙内的坐标。
-
-    输入语义：position 是 ghost 坐标或空 tuple。
-    输出语义：返回可用于地图距离查询的坐标；空 tuple 原样保留。
-    关键约束：只修正旧脚本显式列出的三个墙内坐标。
-    """
-
-    if position == ():
-        return position
-    return GHOST_POSITION_FIXES.get(position, position)
-
-
 def _is_float_marker(value: Any) -> bool:
     """判断一个值是否属于旧代码用来表示缺失的浮点标记。
 
-    输入语义：value 来自 csv、DataFrame 或解析过程。
+    输入语义：value 来自 DataFrame 或解析过程。
     输出语义：Python float 和 numpy floating 返回 True。
     关键约束：整数状态值不能被当作浮点缺失标记。
     """

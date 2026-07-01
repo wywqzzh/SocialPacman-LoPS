@@ -1,8 +1,8 @@
 """frame_data 标准分析字段预处理。
 
 本模块位于 raw frame_data 之后、tile 抽样之前。它只负责把逐帧数据收敛到
-后续分析流程需要的标准字段集合：统一 id 命名、生成 game_id、规范坐标和
-ghost 状态类型，并删除视频或原始采集专用字段。
+后续分析流程需要的标准字段集合：统一 id 命名、生成 game_id、规范两个
+Pacman 与 ghost 坐标和 ghost 状态类型，并删除视频或原始采集专用字段。
 """
 
 from __future__ import annotations
@@ -16,12 +16,23 @@ import numpy as np
 import pandas as pd
 
 
-STANDARD_FRAME_COLUMNS: tuple[str, ...] = (
+BASE_STANDARD_FRAME_COLUMNS: tuple[str, ...] = (
     "frame_id",
     "DayTrial",
     "game_id",
     "Step",
-    "pacmanPos",
+    "p1_pos",
+    "p1_mode",
+    "p1_alive",
+)
+
+OPTIONAL_P2_FRAME_COLUMNS: tuple[str, ...] = (
+    "p2_pos",
+    "p2_mode",
+    "p2_alive",
+)
+
+TAIL_STANDARD_FRAME_COLUMNS: tuple[str, ...] = (
     "ghost1Pos",
     "ghost2Pos",
     "ifscared1",
@@ -118,16 +129,20 @@ def normalize_frame_id(data: pd.DataFrame) -> pd.Series:
 def preprocess_frame_data(data: pd.DataFrame) -> pd.DataFrame:
     """把单个 raw frame_data DataFrame 转换为标准分析字段。
 
-    输入语义：data 来自 raw_subject_data_to_frame_data 阶段，仍可能携带视频或原始采集列。
-    输出语义：返回只包含 STANDARD_FRAME_COLUMNS 的 DataFrame。
+    输入语义：data 来自 raw_subject_data_to_frame_data 阶段，仍可能携带视频或原始采集列；
+    双人数据包含 ``p2_pos``，单人数据不保存该列。
+    输出语义：返回只包含标准分析字段的 DataFrame；单人数据不会生成空的 ``p2_pos``。
     关键约束：本阶段不计算 action_dir/available_dir，它们会在 tile/corrected tile
     行序稳定后由 human_tile_data_preprocess 生成。
     """
 
+    has_second_player = "p2_pos" in data.columns
     required_columns = {
         "DayTrial",
         "Step",
-        "pacmanPos",
+        "p1_pos",
+        "p1_mode",
+        "p1_alive",
         "ghost1Pos",
         "ghost2Pos",
         "ifscared1",
@@ -138,13 +153,24 @@ def preprocess_frame_data(data: pd.DataFrame) -> pd.DataFrame:
     missing = sorted(required_columns - set(data.columns))
     if missing:
         raise FrameDataPreprocessError(f"frame_data 缺少标准化所需字段：{missing}")
+    if has_second_player:
+        p2_required = {"p2_mode", "p2_alive"}
+        p2_missing = sorted(p2_required - set(data.columns))
+        if p2_missing:
+            raise FrameDataPreprocessError(f"双人 frame_data 缺少 p2 状态字段：{p2_missing}")
 
     result = pd.DataFrame()
     result["frame_id"] = normalize_frame_id(data)
     result["DayTrial"] = data["DayTrial"].astype(str)
     result["game_id"] = result["DayTrial"].map(build_game_id)
     result["Step"] = pd.to_numeric(data["Step"], errors="raise").astype("int64")
-    result["pacmanPos"] = data["pacmanPos"].map(parse_position)
+    result["p1_pos"] = data["p1_pos"].map(parse_position)
+    result["p1_mode"] = pd.to_numeric(data["p1_mode"], errors="raise").astype("int8")
+    result["p1_alive"] = data["p1_alive"].astype(bool)
+    if has_second_player:
+        result["p2_pos"] = data["p2_pos"].map(parse_position)
+        result["p2_mode"] = pd.to_numeric(data["p2_mode"], errors="raise").astype("int8")
+        result["p2_alive"] = data["p2_alive"].astype(bool)
     result["ghost1Pos"] = data["ghost1Pos"].map(parse_position)
     result["ghost2Pos"] = data["ghost2Pos"].map(parse_position)
     # ghost 状态码在 two-ghost 数据中必须存在；缺失值使用 -1 后压缩为 int8。
@@ -152,7 +178,20 @@ def preprocess_frame_data(data: pd.DataFrame) -> pd.DataFrame:
     result["ifscared2"] = pd.to_numeric(data["ifscared2"], errors="coerce").fillna(-1).astype("int8")
     result["beans"] = data["beans"].map(parse_position_list)
     result["energizers"] = data["energizers"].map(parse_position_list)
-    return result.loc[:, STANDARD_FRAME_COLUMNS]
+    return result.loc[:, _standard_frame_columns(has_second_player)]
+
+
+def _standard_frame_columns(has_second_player: bool) -> tuple[str, ...]:
+    """返回当前玩家结构对应的标准 frame_data 列顺序。
+
+    输入语义：has_second_player 表示输入表是否包含第二个 Pacman。
+    输出语义：返回最终输出列顺序。
+    关键约束：单人数据不补 ``p2_pos``，双人数据把 ``p2_pos`` 放在 ``p1_pos`` 后。
+    """
+
+    if has_second_player:
+        return BASE_STANDARD_FRAME_COLUMNS + OPTIONAL_P2_FRAME_COLUMNS + TAIL_STANDARD_FRAME_COLUMNS
+    return BASE_STANDARD_FRAME_COLUMNS + TAIL_STANDARD_FRAME_COLUMNS
 
 
 def preprocess_frame_data_file(input_path: Path | str, output_path: Path | str) -> dict[str, Any]:
@@ -172,6 +211,8 @@ def preprocess_frame_data_file(input_path: Path | str, output_path: Path | str) 
     return {
         "input_file": source_path.name,
         "output_file": target_path.name,
+        "input_path": str(source_path),
+        "output_path": str(target_path),
         "rows": int(len(result)),
         "columns": list(result.columns),
     }
@@ -197,8 +238,9 @@ def preprocess_frame_data_directory(
 ) -> list[dict[str, Any]]:
     """批量预处理一个 frame_data 目录。
 
-    输入语义：input_dir 是包含 frame_data pickle 的扁平目录；files 可限制文件名白名单。
-    输出语义：output_dir 下生成同名 pickle，并返回逐文件摘要。
+    输入语义：input_dir 必须是 ``task/session.pkl`` 嵌套目录；files 可限制
+    session 文件名或 ``task/session``。
+    输出语义：output_dir 下生成同名 pickle，并保留输入的 task 层级。
     关键约束：文件排序只影响日志顺序，不改变单个文件内部数据。
     """
 
@@ -207,20 +249,17 @@ def preprocess_frame_data_directory(
     if not source_dir.is_dir():
         raise FrameDataPreprocessError(f"frame_data 输入目录不存在：{source_dir}")
 
-    selected_files = set(files or [])
-    input_paths = sorted(source_dir.glob("*.pkl"))
-    if selected_files:
-        input_paths = [path for path in input_paths if path.name in selected_files]
-        missing = selected_files - {path.name for path in input_paths}
-        if missing:
-            raise FrameDataPreprocessError(f"找不到指定 frame_data 文件：{sorted(missing)}")
-    if not input_paths:
+    input_entries = _collect_frame_data_inputs(source_dir, files)
+    if not input_entries:
         raise FrameDataPreprocessError(f"{source_dir} 下没有 frame_data pkl 文件。")
     if workers < 1:
         raise FrameDataPreprocessError("workers 必须大于等于 1。")
 
     target_dir.mkdir(parents=True, exist_ok=True)
-    tasks = [(str(path), str(target_dir / path.name)) for path in input_paths]
+    tasks = [
+        (str(path), str(target_dir / task_name / path.name if task_name else target_dir / path.name))
+        for task_name, path in input_entries
+    ]
     if workers == 1:
         return [_preprocess_worker(task) for task in tasks]
 
@@ -235,3 +274,39 @@ def preprocess_frame_data_directory(
                 raise FrameDataPreprocessError(f"{file_name} 预处理失败：{exc}") from exc
     summaries.sort(key=lambda item: str(item["input_file"]))
     return summaries
+
+
+def _collect_frame_data_inputs(source_dir: Path, files: Iterable[str] | None) -> list[tuple[str | None, Path]]:
+    """收集 03 阶段需要处理的 frame_data 文件。
+
+    输入语义：source_dir 必须使用 task/session 两层结构；files 可写文件名、
+    session stem 或 ``task/session``。
+    输出语义：返回 ``(task_name, pkl_path)``。
+    关键约束：不再兼容扁平目录，避免旧结构数据混入当前流程。
+    """
+
+    entries: list[tuple[str | None, Path]] = []
+    for task_dir in sorted(path for path in source_dir.iterdir() if path.is_dir()):
+        for path in sorted(task_dir.glob("*.pkl")):
+            entries.append((task_dir.name, path))
+
+    selected = set(files or [])
+    if not selected:
+        return entries
+
+    matched: set[str] = set()
+    filtered: list[tuple[str | None, Path]] = []
+    for task_name, path in entries:
+        stem = path.stem
+        keys = {path.name, stem}
+        if task_name:
+            keys.add(f"{task_name}/{path.name}")
+            keys.add(f"{task_name}/{stem}")
+        if keys & selected:
+            matched.update(keys & selected)
+            filtered.append((task_name, path))
+
+    missing = selected - matched
+    if missing:
+        raise FrameDataPreprocessError(f"找不到指定 frame_data 文件：{sorted(missing)}")
+    return filtered

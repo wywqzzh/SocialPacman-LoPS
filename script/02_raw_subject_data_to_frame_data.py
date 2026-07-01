@@ -23,9 +23,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dir", type=Path, default=PROJECT_ROOT / "data/01_raw_subject_data")
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "data/02_frame_data")
     parser.add_argument("--csv-output-dir", type=Path, default=PROJECT_ROOT / "data/02_frame_data_csv")
-    parser.add_argument("--workers", type=int, default=34)
+    parser.add_argument("--workers", type=int, default=8, help="并行进程数；默认 8，避免大型 pkl 同时读写造成内存压力。")
     parser.add_argument("--write-csv", action="store_true")
-    parser.add_argument("sessions", nargs="*", help="可选：只处理这些 session。")
+    parser.add_argument("sessions", nargs="*", help="可选：只处理这些 session，支持 session 或 task/session。")
     return parser.parse_args()
 
 

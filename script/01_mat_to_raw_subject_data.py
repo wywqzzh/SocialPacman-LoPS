@@ -27,6 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-root", type=Path, default=PROJECT_ROOT / "data/00_raw_mat_data")
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "data/01_raw_subject_data")
+    parser.add_argument("--tasks", nargs="*", default=None, help="可选：只处理这些任务目录，例如 comp coop。")
     parser.add_argument("--workers", type=int, default=34)
     parser.add_argument("sessions", nargs="*", help="可选：只处理这些 session。")
     return parser.parse_args()
@@ -40,6 +41,7 @@ def main() -> None:
         args.raw_root,
         output_dir=args.output_dir,
         selected_subjects=args.sessions or None,
+        selected_tasks=args.tasks,
         workers=args.workers,
     )
     print("raw_subject_data 生成完成")

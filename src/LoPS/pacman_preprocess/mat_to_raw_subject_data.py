@@ -3,8 +3,9 @@
 
 这个脚本复现 MATLAB 版 translateData + BEVdata.readData 的核心逻辑：
 读取每个 session 下的 trial .mat，
-抽取逐帧游戏状态字段。raw_mat_data 下每个文件夹视为一个 subject/session，
-每个 subject/session 的多个 trial 会合并保存成一个 raw_subject_data PKL。
+抽取逐帧游戏状态字段。raw_mat_data 可以是旧版扁平 session 目录，也可以是
+新版 task/session 嵌套目录；每个 subject/session 的多个 trial 会合并保存成
+一个 raw_subject_data PKL。
 """
 
 from __future__ import annotations
@@ -24,8 +25,12 @@ OUTPUT_COLUMNS = [
     "Step",
     "DayTrial",
     "Map",
-    "pacMan_1",
-    "pacMan_2",
+    "p1_pacMan_1",
+    "p1_pacMan_2",
+    "p1_mode",
+    "p2_pacMan_1",
+    "p2_pacMan_2",
+    "p2_mode",
     "ghost1_1",
     "ghost1_2",
     "ghost1_3",
@@ -38,11 +43,16 @@ OUTPUT_COLUMNS = [
     "ghost4_1",
     "ghost4_2",
     "ghost4_3",
-    "JoyStick",
-    "ppX",
-    "ppY",
-    "pDir",
-    "pFrame",
+    "p1_JoyStick",
+    "p2_JoyStick",
+    "p1_ppX",
+    "p1_ppY",
+    "p1_pDir",
+    "p1_pFrame",
+    "p2_ppX",
+    "p2_ppY",
+    "p2_pDir",
+    "p2_pFrame",
     "g1pX",
     "g1pY",
     "g1Dir",
@@ -67,10 +77,27 @@ OUTPUT_COLUMNS = [
     "g4ModeR",
     "g4Scared",
     "g4Frame",
-    "waterTS",
-    "waterStatus",
-    "waterDelay",
+    "p1_waterTS",
+    "p1_waterStatus",
+    "p1_waterDelay",
+    "p2_waterTS",
+    "p2_waterStatus",
+    "p2_waterDelay",
 ]
+
+P2_OUTPUT_COLUMNS = {
+    "p2_pacMan_1",
+    "p2_pacMan_2",
+    "p2_mode",
+    "p2_JoyStick",
+    "p2_ppX",
+    "p2_ppY",
+    "p2_pDir",
+    "p2_pFrame",
+    "p2_waterTS",
+    "p2_waterStatus",
+    "p2_waterDelay",
+}
 
 
 # 旧 fmriFrameData 里有几组 2022-11-13/14 session 的 DayTrial subject code
@@ -97,6 +124,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("raw_root", type=Path, help="raw_mat_data 根目录。")
     parser.add_argument("output_dir", type=Path, help="raw_subject_data 输出目录。")
     parser.add_argument("sessions", nargs="*", help="可选：只处理这些 subject/session 文件夹名；不传则处理全部。")
+    parser.add_argument("--tasks", nargs="*", default=None, help="可选：只处理这些任务目录，例如 comp coop。")
     parser.add_argument("--workers", type=int, default=34, help="并行进程数。默认使用 CPU 数、8 和 subject 数中的较小值。")
     return parser.parse_args()
 
@@ -110,6 +138,7 @@ def main() -> None:
         args.raw_root,
         output_dir=args.output_dir,
         selected_subjects=args.sessions or None,
+        selected_tasks=args.tasks,
         workers=args.workers,
     )
 
@@ -125,40 +154,40 @@ def convert_mat_root_to_raw_subject_data(
     *,
     output_dir: Path,
     selected_subjects: Iterable[str] | None = None,
+    selected_tasks: Iterable[str] | None = None,
     add_key: bool = False,
     workers: int | None = None,
 ) -> list[dict[str, object]]:
     """读取 ``raw_root`` 下所有 subject/session，并单独保存为 raw_subject_data PKL。
 
-    输入语义：raw_root 下每个 session 目录包含多个 trial `.mat` 文件。
-    输出语义：每个 session 目录对应一个 `{session}.pkl`。
-    关键约束：输出文件仍保留 session 原名，便于回溯到 raw_mat_data。
+    输入语义：raw_root 可直接包含 session 目录，也可包含 task/session 两层目录。
+    输出语义：旧扁平输入写为 `{session}.pkl`；新版嵌套输入写为 `{task}/{session}.pkl`。
+    关键约束：输出文件仍保留 session 原名，任务类型只由目录表达，不写入数据列。
     """
 
     if not raw_root.exists():
         raise RawFmriError(f"找不到原始数据目录：{raw_root}")
 
-    # 默认处理所有带 '-' 的 session 文件夹；如果传入位置参数 sessions，则只处理白名单。
-    selected = set(selected_subjects or [])
-    session_dirs = sorted(path for path in raw_root.iterdir() if path.is_dir() and "-" in path.name)
-    if selected:
-        session_dirs = [path for path in session_dirs if path.name in selected]
-        missing = selected - {path.name for path in session_dirs}
-        if missing:
-            raise RawFmriError(f"找不到指定 subject/session：{sorted(missing)}")
+    # 同时兼容旧版扁平目录和新版 task/session 嵌套目录。selected_subjects
+    # 可以写 session 名，也可以写 task/session，便于只跑某个任务下的同名 session。
+    session_entries = _discover_session_entries(
+        raw_root,
+        selected_subjects=selected_subjects,
+        selected_tasks=selected_tasks,
+    )
 
-    if not session_dirs:
+    if not session_entries:
         raise RawFmriError(f"{raw_root} 下没有可处理的 subject/session 文件夹。")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     # 原始 .mat 读取较重，默认最多开 8 个进程；需要更高并行度时显式传 --workers。
     if workers is None:
-        workers = min(8, os.cpu_count() or 1, len(session_dirs))
+        workers = min(8, os.cpu_count() or 1, len(session_entries))
     if workers < 1:
         raise RawFmriError("--workers 必须大于等于 1。")
 
-    print(f"开始转换 {len(session_dirs)} 个 subject/session；并行进程数：{workers}")
-    tasks = [(str(session_dir), str(output_dir), add_key) for session_dir in session_dirs]
+    print(f"开始转换 {len(session_entries)} 个 subject/session；并行进程数：{workers}")
+    tasks = [(str(session_dir), str(output_dir), add_key, task_name) for task_name, session_dir in session_entries]
     if workers == 1:
         results = []
         for task in tasks:
@@ -168,7 +197,10 @@ def convert_mat_root_to_raw_subject_data(
     else:
         results = []
         with ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(_convert_subject_worker, task): Path(task[0]).name for task in tasks}
+            futures = {
+                executor.submit(_convert_subject_worker, task): f"{task[3]}/{Path(task[0]).name}" if task[3] else Path(task[0]).name
+                for task in tasks
+            }
             for future in as_completed(futures):
                 subject = futures[future]
                 try:
@@ -184,28 +216,82 @@ def convert_mat_root_to_raw_subject_data(
     return results
 
 
+def _discover_session_entries(
+    raw_root: Path,
+    *,
+    selected_subjects: Iterable[str] | None,
+    selected_tasks: Iterable[str] | None,
+) -> list[tuple[str | None, Path]]:
+    """发现需要处理的 session 目录，并记录其所属任务目录。
+
+    输入语义：raw_root 是 00_raw_mat_data；selected_subjects 可包含 session 名或
+    `task/session`，selected_tasks 可限制 comp/coop 等顶层任务目录。
+    输出语义：返回 `(task_name, session_dir)` 列表；旧扁平目录的 task_name 为 None。
+    关键约束：任务信息只用于输出目录，不写入 raw DataFrame 字段。
+    """
+
+    selected = set(selected_subjects or [])
+    task_filter = set(selected_tasks or [])
+    entries: list[tuple[str | None, Path]] = []
+
+    # 旧版数据直接把 session 放在 raw_root 下；只要目录名带 '-' 且含 mat 文件就视作 session。
+    for path in sorted(raw_root.iterdir()):
+        if path.is_dir() and "-" in path.name and any(path.glob("*.mat")) and not task_filter:
+            entries.append((None, path))
+
+    # 新版数据使用 task/session 两层目录，例如 comp/{session} 和 coop/{session}。
+    for task_dir in sorted(path for path in raw_root.iterdir() if path.is_dir() and "-" not in path.name):
+        if task_filter and task_dir.name not in task_filter:
+            continue
+        for session_dir in sorted(path for path in task_dir.iterdir() if path.is_dir() and "-" in path.name):
+            if any(session_dir.glob("*.mat")):
+                entries.append((task_dir.name, session_dir))
+
+    if not selected:
+        return entries
+
+    matched: set[str] = set()
+    filtered: list[tuple[str | None, Path]] = []
+    for task_name, session_dir in entries:
+        keys = {session_dir.name}
+        if task_name is not None:
+            keys.add(f"{task_name}/{session_dir.name}")
+        if keys & selected:
+            matched.update(keys & selected)
+            filtered.append((task_name, session_dir))
+
+    missing = selected - matched
+    if missing:
+        raise RawFmriError(f"找不到指定 subject/session：{sorted(missing)}")
+    return filtered
+
+
 def _format_result(item: dict[str, object]) -> str:
     """把一个 session 的抽取结果格式化成进度日志。"""
 
     return f"{item['subject']}: rows={item['rows']}, trials={item['trials']}, skipped={item['skipped']}, output={item['output']}"
 
 
-def _convert_subject_worker(task: tuple[str, str, bool]) -> dict[str, object]:
+def _convert_subject_worker(task: tuple[str, str, bool, str | None]) -> dict[str, object]:
     """多进程 worker：转换一个 subject/session 并写入独立 PKL。"""
 
     session_dir = Path(task[0])
     output_dir = Path(task[1])
     add_key = task[2]
+    task_name = task[3]
     session_data, session_skipped = convert_mat_session_to_raw_subject_data(session_dir)
-    # 固定列顺序可以让后续 frame table 构建和旧数据对比更稳定。
-    session_data = session_data[OUTPUT_COLUMNS]
+    # 固定已有列的顺序，但不为单人数据补出不存在的 p2 列，避免保存全 NaN 字段。
+    session_data = _ordered_existing_output_columns(session_data)
     if add_key:
         session_data["Key"] = session_data["DayTrial"].astype(str) + "-" + session_data["Step"].astype(str)
 
-    output_path = output_dir / f"{session_dir.name}.pkl"
+    output_parent = output_dir / task_name if task_name else output_dir
+    output_parent.mkdir(parents=True, exist_ok=True)
+    output_path = output_parent / f"{session_dir.name}.pkl"
     session_data.to_pickle(output_path)
+    subject_label = f"{task_name}/{session_dir.name}" if task_name else session_dir.name
     return {
-        "subject": session_dir.name,
+        "subject": subject_label,
         "rows": len(session_data),
         "trials": session_data["DayTrial"].nunique() if not session_data.empty else 0,
         "skipped": session_skipped,
@@ -233,15 +319,17 @@ def convert_mat_session_to_raw_subject_data(session_dir: Path) -> tuple[pd.DataF
 
     if not parts:
         return pd.DataFrame(columns=OUTPUT_COLUMNS), skipped
+    _validate_session_player_schema(parts, session_dir)
     return pd.concat(parts, ignore_index=True), skipped
 
 
 def convert_mat_trial_to_frame_rows(trial_path: Path, session_name: str | None = None) -> pd.DataFrame | None:
     """转换单个 trial `.mat` 为逐帧 DataFrame。
 
-    输出仍然接近旧 MATLAB ``translateData`` 的字段命名：tile 坐标使用
-    ``pacMan_1/ghost1_1`` 这类历史字段；渲染需要的像素坐标、朝向和动画帧
-    则保存在 ``ppX/g1pX/g1Dir`` 等列中。
+    输出仍然接近旧 MATLAB ``translateData`` 的字段命名：ghost 字段继续使用
+    ``ghost1_1/g1pX`` 等历史字段；Pacman 玩家字段使用 ``p1_``/``p2_``
+    前缀。若原始 trial 只有一个玩家，则只生成 ``p1_`` 字段，不额外保存
+    全 NaN 的 ``p2_`` 列。
     """
 
     with h5py.File(trial_path, "r") as mat:
@@ -251,13 +339,15 @@ def convert_mat_trial_to_frame_rows(trial_path: Path, session_name: str | None =
         # 原始 `.mat` 中大部分变量是一帧一个值。先确定帧数，后续所有数组都
         # 会整理成长度为 n_frames 的列，避免 MATLAB 行/列方向差异造成错位。
         n_frames = _frame_count(mat)
+        player_count = _player_count(mat, n_frames)
         scared = _ghost_matrix(mat, "data/ghosts/scared", n_frames)
 
         ghost_dir_enum = _ghost_dir_enum(mat, n_frames)
         mode = _mode_transfer(mat, n_frames)
 
-        pacman_tile_x = _col(mat, "data/pacMan/tile_x", n_frames)
-        pacman_tile_y = _col(mat, "data/pacMan/tile_y", n_frames)
+        p1_pacman_tile_x = _player_col(mat, "data/pacMan/tile_x", n_frames, 0)
+        p1_pacman_tile_y = _player_col(mat, "data/pacMan/tile_y", n_frames, 0)
+        p1_pacman_mode = _player_col(mat, "data/pacMan/mode", n_frames, 0)
         ghost_tile_x = _ghost_matrix(mat, "data/ghosts/tile_x", n_frames)
         ghost_tile_y = _ghost_matrix(mat, "data/ghosts/tile_y", n_frames)
 
@@ -266,66 +356,125 @@ def convert_mat_trial_to_frame_rows(trial_path: Path, session_name: str | None =
         ghost_pixel_x = _ghost_matrix(mat, "data/ghosts/pixel_x", n_frames)
         ghost_pixel_y = _ghost_matrix(mat, "data/ghosts/pixel_y", n_frames)
 
-        water_ts, water_status, water_delay = _set_do_time_delay(mat, n_frames)
+        p1_water_ts, p1_water_status, p1_water_delay = _set_do_time_delay(mat, n_frames, 0)
         map_values = _map_strings(mat, n_frames)
 
         # 这里集中构造输出表，确保每一列都是逐帧长度。第三、第四个 ghost
         # 即使在 two-ghost trial 中不存在，也会由 _ghost_matrix 补成 inf，
-        # 这样下游可以统一判断 trial 类型。
-        frame = pd.DataFrame(
-            {
-                "Step": np.arange(1, n_frames + 1, dtype=np.int64),
-                "DayTrial": _canonical_day_trial(trial_path, session_name),
-                "Map": map_values,
-                "pacMan_1": pacman_tile_x,
-                "pacMan_2": pacman_tile_y,
-                "ghost1_1": ghost_tile_x[:, 0],
-                "ghost1_2": ghost_tile_y[:, 0],
-                "ghost1_3": mode[:, 0],
-                "ghost2_1": ghost_tile_x[:, 1],
-                "ghost2_2": ghost_tile_y[:, 1],
-                "ghost2_3": mode[:, 1],
-                "ghost3_1": ghost_tile_x[:, 2],
-                "ghost3_2": ghost_tile_y[:, 2],
-                "ghost3_3": mode[:, 2],
-                "ghost4_1": ghost_tile_x[:, 3],
-                "ghost4_2": ghost_tile_y[:, 3],
-                "ghost4_3": mode[:, 3],
-                "JoyStick": _joystick(mat, n_frames),
-                "ppX": _col(mat, "data/pacMan/pixel_x", n_frames),
-                "ppY": _col(mat, "data/pacMan/pixel_y", n_frames),
-                "pDir": _dir_enum_to_text(_col(mat, "data/pacMan/dirEnum", n_frames)),
-                "pFrame": _col(mat, "data/pacMan/frames", n_frames),
-                "g1pX": ghost_pixel_x[:, 0],
-                "g1pY": ghost_pixel_y[:, 0],
-                "g1Dir": _dir_enum_to_text(ghost_dir_enum[:, 0]),
-                "g1ModeR": ghost_mode_raw[:, 0],
-                "g1Scared": scared[:, 0],
-                "g1Frame": ghost_frames[:, 0],
-                "g2pX": ghost_pixel_x[:, 1],
-                "g2pY": ghost_pixel_y[:, 1],
-                "g2Dir": _dir_enum_to_text(ghost_dir_enum[:, 1]),
-                "g2ModeR": ghost_mode_raw[:, 1],
-                "g2Scared": scared[:, 1],
-                "g2Frame": ghost_frames[:, 1],
-                "g3pX": ghost_pixel_x[:, 2],
-                "g3pY": ghost_pixel_y[:, 2],
-                "g3Dir": _dir_enum_to_text(ghost_dir_enum[:, 2]),
-                "g3ModeR": ghost_mode_raw[:, 2],
-                "g3Scared": scared[:, 2],
-                "g3Frame": ghost_frames[:, 2],
-                "g4pX": ghost_pixel_x[:, 3],
-                "g4pY": ghost_pixel_y[:, 3],
-                "g4Dir": _dir_enum_to_text(ghost_dir_enum[:, 3]),
-                "g4ModeR": ghost_mode_raw[:, 3],
-                "g4Scared": scared[:, 3],
-                "g4Frame": ghost_frames[:, 3],
-                "waterTS": water_ts,
-                "waterStatus": water_status,
-                "waterDelay": water_delay,
-            }
-        )
+        # 这样下游可以统一判断 trial 类型。玩家 2 相关字段只在原始数据确实
+        # 有第二列时加入，满足单人数据不保存 p2 空列的约束。
+        frame_columns: dict[str, object] = {
+            "Step": np.arange(1, n_frames + 1, dtype=np.int64),
+            "DayTrial": _canonical_day_trial(trial_path, session_name),
+            "Map": map_values,
+            "p1_pacMan_1": p1_pacman_tile_x,
+            "p1_pacMan_2": p1_pacman_tile_y,
+            "p1_mode": p1_pacman_mode,
+            "ghost1_1": ghost_tile_x[:, 0],
+            "ghost1_2": ghost_tile_y[:, 0],
+            "ghost1_3": mode[:, 0],
+            "ghost2_1": ghost_tile_x[:, 1],
+            "ghost2_2": ghost_tile_y[:, 1],
+            "ghost2_3": mode[:, 1],
+            "ghost3_1": ghost_tile_x[:, 2],
+            "ghost3_2": ghost_tile_y[:, 2],
+            "ghost3_3": mode[:, 2],
+            "ghost4_1": ghost_tile_x[:, 3],
+            "ghost4_2": ghost_tile_y[:, 3],
+            "ghost4_3": mode[:, 3],
+            "p1_JoyStick": _joystick(mat, n_frames, 0),
+            "p1_ppX": _player_col(mat, "data/pacMan/pixel_x", n_frames, 0),
+            "p1_ppY": _player_col(mat, "data/pacMan/pixel_y", n_frames, 0),
+            "p1_pDir": _dir_enum_to_text(_player_col(mat, "data/pacMan/dirEnum", n_frames, 0)),
+            "p1_pFrame": _player_col(mat, "data/pacMan/frames", n_frames, 0),
+            "g1pX": ghost_pixel_x[:, 0],
+            "g1pY": ghost_pixel_y[:, 0],
+            "g1Dir": _dir_enum_to_text(ghost_dir_enum[:, 0]),
+            "g1ModeR": ghost_mode_raw[:, 0],
+            "g1Scared": scared[:, 0],
+            "g1Frame": ghost_frames[:, 0],
+            "g2pX": ghost_pixel_x[:, 1],
+            "g2pY": ghost_pixel_y[:, 1],
+            "g2Dir": _dir_enum_to_text(ghost_dir_enum[:, 1]),
+            "g2ModeR": ghost_mode_raw[:, 1],
+            "g2Scared": scared[:, 1],
+            "g2Frame": ghost_frames[:, 1],
+            "g3pX": ghost_pixel_x[:, 2],
+            "g3pY": ghost_pixel_y[:, 2],
+            "g3Dir": _dir_enum_to_text(ghost_dir_enum[:, 2]),
+            "g3ModeR": ghost_mode_raw[:, 2],
+            "g3Scared": scared[:, 2],
+            "g3Frame": ghost_frames[:, 2],
+            "g4pX": ghost_pixel_x[:, 3],
+            "g4pY": ghost_pixel_y[:, 3],
+            "g4Dir": _dir_enum_to_text(ghost_dir_enum[:, 3]),
+            "g4ModeR": ghost_mode_raw[:, 3],
+            "g4Scared": scared[:, 3],
+            "g4Frame": ghost_frames[:, 3],
+            "p1_waterTS": p1_water_ts,
+            "p1_waterStatus": p1_water_status,
+            "p1_waterDelay": p1_water_delay,
+        }
+        if player_count >= 2:
+            p2_water_ts, p2_water_status, p2_water_delay = _set_do_time_delay(mat, n_frames, 1)
+            frame_columns.update(
+                {
+                    "p2_pacMan_1": _player_col(mat, "data/pacMan/tile_x", n_frames, 1),
+                    "p2_pacMan_2": _player_col(mat, "data/pacMan/tile_y", n_frames, 1),
+                    "p2_mode": _player_col(mat, "data/pacMan/mode", n_frames, 1),
+                    "p2_JoyStick": _joystick(mat, n_frames, 1),
+                    "p2_ppX": _player_col(mat, "data/pacMan/pixel_x", n_frames, 1),
+                    "p2_ppY": _player_col(mat, "data/pacMan/pixel_y", n_frames, 1),
+                    "p2_pDir": _dir_enum_to_text(_player_col(mat, "data/pacMan/dirEnum", n_frames, 1)),
+                    "p2_pFrame": _player_col(mat, "data/pacMan/frames", n_frames, 1),
+                    "p2_waterTS": p2_water_ts,
+                    "p2_waterStatus": p2_water_status,
+                    "p2_waterDelay": p2_water_delay,
+                }
+            )
+        frame = pd.DataFrame(frame_columns)
     return frame
+
+
+def _ordered_existing_output_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """按标准顺序排列当前 DataFrame 已有的输出列。
+
+    输入语义：frame 是单人或双人 raw_subject_data；单人数据不含 ``p2_`` 列。
+    输出语义：返回只包含已有列、且顺序符合 OUTPUT_COLUMNS 的 DataFrame。
+    关键约束：该函数不会为缺失字段补列，避免单人数据出现全 NaN 的 p2 字段。
+    """
+
+    ordered_columns = [column for column in OUTPUT_COLUMNS if column in frame.columns]
+    extra_columns = [column for column in frame.columns if column not in OUTPUT_COLUMNS]
+    return frame.loc[:, ordered_columns + extra_columns]
+
+
+def _validate_session_player_schema(parts: list[pd.DataFrame], session_dir: Path) -> None:
+    """检查同一个 session 内的 trial 是否拥有一致的玩家字段结构。
+
+    输入语义：parts 是同一 session 下各 trial 转换后的逐帧表。
+    输出语义：无返回；发现单人/双人字段混杂时抛出 RawFmriError。
+    关键约束：同一 session 不应混合单人和双人任务，否则后续 trial 合并会产生
+    半空列，难以判断是数据缺失还是任务设计差异。
+    """
+
+    schema_flags = {tuple(column for column in part.columns if column in P2_OUTPUT_COLUMNS) for part in parts}
+    if len(schema_flags) > 1:
+        raise RawFmriError(f"{session_dir} 内同时存在单人和双人 trial，请先拆分后再转换。")
+
+
+def _player_count(mat: h5py.File, n_frames: int) -> int:
+    """根据 Pacman tile_x 字段判断 trial 中真实存在的玩家数量。
+
+    输入语义：mat 是一个原始 trial 文件，n_frames 是该 trial 的帧数。
+    输出语义：返回玩家列数，目前只允许 1 或 2 个玩家。
+    关键约束：玩家数量以坐标主字段为准；其它玩家字段必须至少能提供对应列。
+    """
+
+    count = _player_matrix(mat, "data/pacMan/tile_x", n_frames).shape[1]
+    if count not in (1, 2):
+        raise RawFmriError(f"Pacman 玩家列数为 {count}，当前流程只支持单人或双人数据。")
+    return count
 
 
 def _frame_count(mat: h5py.File) -> int:
@@ -344,6 +493,57 @@ def _col(mat: h5py.File, path: str, n_frames: int) -> np.ndarray:
         elif arr.shape[1] == n_frames:
             arr = arr[0, :]
     return np.asarray(arr).reshape(-1)
+
+
+def _player_col(
+    mat: h5py.File,
+    path: str,
+    n_frames: int,
+    player_index: int,
+    *,
+    missing_value: float = np.nan,
+) -> np.ndarray:
+    """读取玩家相关逐帧字段中的指定玩家列。
+
+    输入语义：path 指向 Pacman、按键或 reward 等玩家字段；player_index 使用
+    0/1 对应 p1/p2。
+    输出语义：返回长度为 n_frames 的数组；单人数据缺少 p2 时返回 missing_value。
+    关键约束：这里只用于玩家字段，ghost 矩阵仍由 _ghost_matrix 按 ghost 维度读取。
+    """
+
+    matrix = _player_matrix(mat, path, n_frames)
+    if matrix.shape[1] <= player_index:
+        return np.full(n_frames, missing_value)
+    return matrix[:, player_index]
+
+
+def _player_column_exists(mat: h5py.File, path: str, n_frames: int, player_index: int) -> bool:
+    """判断玩家字段是否包含指定玩家列。"""
+
+    return _player_matrix(mat, path, n_frames).shape[1] > player_index
+
+
+def _player_matrix(mat: h5py.File, path: str, n_frames: int) -> np.ndarray:
+    """把玩家字段统一整理成 ``n_frames x player_count`` 矩阵。
+
+    输入语义：新双人数据通常是 ``n_frames x 2``，旧单人数据可能是一维或
+    ``n_frames x 1``。
+    输出语义：返回二维矩阵，列表示玩家。
+    关键约束：该函数不补列；是否补 p2 由 _player_col 根据调用场景决定。
+    """
+
+    arr = np.asarray(mat[path])
+    if arr.ndim == 1:
+        if arr.shape[0] != n_frames:
+            raise RawFmriError(f"{path} 的长度 {arr.shape[0]} 无法和帧数 {n_frames} 对齐。")
+        return arr.reshape(n_frames, 1)
+    if arr.ndim != 2:
+        raise RawFmriError(f"{path} 不是一维或二维玩家字段。")
+    if arr.shape[0] == n_frames:
+        return arr
+    if arr.shape[1] == n_frames:
+        return arr.T
+    raise RawFmriError(f"{path} 的形状 {arr.shape} 无法和帧数 {n_frames} 对齐。")
 
 
 def _matrix(mat: h5py.File, path: str, n_frames: int) -> np.ndarray:
@@ -411,13 +611,16 @@ def _dir_enum_to_text(values: np.ndarray) -> np.ndarray:
     return result
 
 
-def _joystick(mat: h5py.File, n_frames: int) -> np.ndarray:
-    """复现 MATLAB ``TransDir``：把四个按键通道合成为一个方向字符串。"""
+def _joystick(mat: h5py.File, n_frames: int, player_index: int) -> np.ndarray:
+    """复现 MATLAB ``TransDir``：把指定玩家的四个按键通道合成为方向字符串。"""
 
-    up = _col(mat, "data/direction/up", n_frames)
-    down = _col(mat, "data/direction/down", n_frames)
-    left = _col(mat, "data/direction/left", n_frames)
-    right = _col(mat, "data/direction/right", n_frames)
+    if not _player_column_exists(mat, "data/direction/up", n_frames, player_index):
+        return np.full(n_frames, "", dtype=object)
+
+    up = _player_col(mat, "data/direction/up", n_frames, player_index)
+    down = _player_col(mat, "data/direction/down", n_frames, player_index)
+    left = _player_col(mat, "data/direction/left", n_frames, player_index)
+    right = _player_col(mat, "data/direction/right", n_frames, player_index)
     direction = np.zeros(n_frames)
 
     # MATLAB TransDir 的赋值顺序不能改：down, right, up, left。
@@ -455,8 +658,10 @@ def _mode_transfer(mat: h5py.File, n_frames: int) -> np.ndarray:
     with np.errstate(divide="ignore", invalid="ignore"):
         flash_index = np.floor((duration - count) / flash_interval)
 
-    pacman_tile_x = _col(mat, "data/pacMan/tile_x", n_frames)
-    pacman_tile_y = _col(mat, "data/pacMan/tile_y", n_frames)
+    # ghost mode 是公共字段；Clyde 的距离分支沿用第一个玩家作为参考，
+    # 避免在第 01 步引入尚未定义的双人联合 mode 语义。
+    pacman_tile_x = _player_col(mat, "data/pacMan/tile_x", n_frames, 0)
+    pacman_tile_y = _player_col(mat, "data/pacMan/tile_y", n_frames, 0)
     dx = pacman_tile_x - (tile_x[:, 1] + dir_x[:, 1])
     tile_y = _ghost_matrix(mat, "data/ghosts/tile_y", n_frames)
     dy = pacman_tile_y - (tile_y[:, 1] + dir_y[:, 1])
@@ -486,8 +691,8 @@ def _mode_transfer(mat: h5py.File, n_frames: int) -> np.ndarray:
     return transferred
 
 
-def _set_do_time_delay(mat: h5py.File, n_frames: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """复现奖励给水事件的时间窗和延迟字段。
+def _set_do_time_delay(mat: h5py.File, n_frames: int, player_index: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """复现指定玩家奖励给水事件的时间窗和延迟字段。
 
     输出三列：
     - ``waterTS``：给水阀打开到关闭期间为 1；
@@ -496,16 +701,21 @@ def _set_do_time_delay(mat: h5py.File, n_frames: int) -> tuple[np.ndarray, np.nd
     """
 
     reward_path = "data/reward" if _has_dataset(mat, "data/reward") else "data/rewd/reward"
-    reward = _col(mat, reward_path, n_frames)
+    if not _player_column_exists(mat, reward_path, n_frames, player_index):
+        missing = np.full(n_frames, np.nan)
+        return missing, missing.copy(), missing.copy()
+
+    reward = _player_col(mat, reward_path, n_frames, player_index)
     reward_diff = reward[1:] - reward[:-1]
 
     water_ts = np.zeros(n_frames)
     water_status = np.zeros(n_frames)
     water_delay = np.zeros(n_frames)
-    if not np.any(reward_diff):
+    reward_change = np.isfinite(reward_diff) & (reward_diff != 0)
+    if not np.any(reward_change):
         return water_ts, water_status, water_delay
 
-    open_ts = np.where(reward_diff != 0)[0] + 1
+    open_ts = np.where(reward_change)[0] + 1
     diff_at_open = reward_diff[open_ts - 1]
     close_ts = open_ts + diff_at_open.astype(int) - 1
     close_ts[close_ts > n_frames - 1] = n_frames - 1

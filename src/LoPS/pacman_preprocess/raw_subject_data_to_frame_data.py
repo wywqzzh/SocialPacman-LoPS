@@ -346,6 +346,7 @@ def convert_raw_subject_data_to_frame_data(df: pd.DataFrame) -> pd.DataFrame:
     关键约束：Map 原样保留；beans/energizers 只从 Map 字符串解析，不读取外部地图。
     """
 
+    df = df.copy(deep=True)
     has_second_player = _has_second_player_columns(df)
     required = [
         "Step",
@@ -370,6 +371,11 @@ def convert_raw_subject_data_to_frame_data(df: pd.DataFrame) -> pd.DataFrame:
     missing = [column for column in required if column not in df.columns]
     if missing:
         raise FrameDataError(f"输入数据缺少必要字段：{missing}")
+
+    # 02 是后续所有阶段第一次稳定整理 DayTrial 的地方。这里把前两个 trial
+    # 数字段统一成两位字符串，使 ``01-01``、``02-01``、``10-01`` 的字符串顺序
+    # 与真实 trial 顺序一致，避免 06 等阶段使用字符串排序时发生跨 trial 错位。
+    df["DayTrial"] = df["DayTrial"].map(_canonical_day_trial_label)
 
     keys = ["DayTrial", "Step"]
     grouped_first = df.groupby(keys, sort=False, as_index=False).first()
@@ -442,6 +448,11 @@ def convert_raw_subject_data_to_frame_data(df: pd.DataFrame) -> pd.DataFrame:
     if len(tail_columns) > 2:
         tail_frame = df.loc[:, tail_columns].groupby(keys, sort=False, as_index=False).first()
         data_frame = pd.merge(data_frame, tail_frame, on=keys, how="left")
+
+    # raw_subject_data 的 Key 在 01 阶段使用旧 DayTrial 生成；规范化 DayTrial 后
+    # 这里同步重建 Key，保持 ``DayTrial-Step`` 语义不变，只更新 trial 名字格式。
+    if "Key" in data_frame.columns:
+        data_frame["Key"] = data_frame["DayTrial"].astype(str) + "-" + data_frame["Step"].astype(str)
 
     # 01 阶段保留 MATLAB/Data 表的 1-based Step；frame_data 延续旧流程使用 0-based Step。
     data_frame["Step"] = data_frame["Step"] - 1
@@ -521,6 +532,19 @@ def _sort_grouped_frame_by_daytrial_step(frame: pd.DataFrame) -> pd.DataFrame:
     return sortable.drop(
         columns=["_trial_major", "_trial_minor", "_trial_rest", "_step_numeric"]
     ).reset_index(drop=True)
+
+
+def _canonical_day_trial_label(value: object) -> str:
+    """把 DayTrial 前两个数字段规范成两位字符串。
+
+    输入语义：value 通常形如 ``"1-2-session"`` 或已经是 ``"01-02-session"``。
+    输出语义：返回 ``"01-02-session"`` 形式的 DayTrial 字符串。
+    关键约束：只改写前两个数字段，不改变 session/date/任务后缀内容。
+    """
+
+    major, minor, rest = _day_trial_numeric_sort_key(value)
+    suffix = f"-{rest}" if rest else ""
+    return f"{major:02d}-{minor:02d}{suffix}"
 
 
 def _day_trial_numeric_sort_key(value: object) -> tuple[int, int, str]:

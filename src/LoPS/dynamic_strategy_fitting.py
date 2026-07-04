@@ -1,17 +1,17 @@
-"""人类 fMRI 动态策略权重拟合。
+"""Social Pacman 动态策略权重拟合。
 
-本模块实现集中 utility 数据到 WeightData 的动态策略拟合流程。它只依赖
-调用方显式传入的数据路径和地图常量，不包含旧项目路径，也不导入旧项目代码。
+本模块实现 05 utility 数据到 06 WeightData 的动态策略拟合流程。输入数据
+保持 joint-state 结构，本阶段分别为每个玩家构造临时单人视角、划分 context、
+拟合策略权重，再把玩家前缀结果写回同一份 joint-state 表。
 """
 
 from __future__ import annotations
 
-import ast
 import copy
 import multiprocessing
 import pickle
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,25 +29,15 @@ DEFAULT_AGENTS: tuple[str, ...] = (
     "energizer",
     "no_energizer",
 )
-INTERNAL_COMPATIBILITY_AGENTS: tuple[str, ...] = (
-    "global",
-    "local",
-    "evade_blinky",
-    "evade_clyde",
-    "_compat_padding_agent_1",
-    "_compat_padding_agent_2",
-    "approach",
-    "energizer",
-    "no_energizer",
-)
-OUTPUT_AGENT_INDICES: tuple[int, ...] = (0, 1, 2, 3, 6, 7, 8)
-COMPATIBILITY_PADDING_AGENTS: tuple[str, ...] = ("_compat_padding_agent_1", "_compat_padding_agent_2")
-PARSED_POSITION_COLUMNS: tuple[str, ...] = (
-    "pacmanPos",
-    "ghost1Pos",
-    "ghost2Pos",
-    "beans",
-    "energizers",
+PLAYER_PREFIXES: tuple[str, ...] = ("p1", "p2")
+PLAYER_RESULT_COLUMNS: tuple[str, ...] = (
+    "weight",
+    "normalized_weight",
+    "prediction_correct",
+    "predict_dir",
+    "trial_context",
+    "is_stay",
+    "is_vague",
 )
 
 
@@ -61,7 +51,7 @@ class DynamicStrategyFittingConfig:
     """
 
     agents: tuple[str, ...] = DEFAULT_AGENTS
-    stay_length: int = 6
+    stay_length: int = 4
     ga_population_size: int = 100
     ga_iterations: int = 500
     ga_mutation_probability: float = 0.01
@@ -71,97 +61,6 @@ class DynamicStrategyFittingConfig:
     random_seed: int | None = None
     segment_workers: int = 1
     use_segment_seed: bool = False
-
-
-def parse_literal_if_needed(value: Any) -> Any:
-    """解析 pickle 表中可能以字符串保存的 Python 字面量。
-
-    输入语义：value 可以是字符串形式的 tuple/list，也可以已经是 Python 对象。
-    输出语义：字符串会用 ast.literal_eval 解析，其它对象原样返回。
-    关键约束：不使用 eval，避免把数据解析和代码执行混在一起。
-    """
-
-    if isinstance(value, str):
-        return ast.literal_eval(value)
-    return value
-
-
-def parse_position(value: Any) -> tuple[int, int]:
-    """把地图位置字段解析为坐标 tuple。
-
-    输入语义：value 可以是 ``"(x, y)"`` 字符串，也可以是长度为 2 的 tuple/list。
-    输出语义：返回整数坐标 ``(x, y)``。
-    关键约束：该函数用于读取地图常量，空方向不应传入这里。
-    """
-
-    parsed = parse_literal_if_needed(value)
-    if not isinstance(parsed, (tuple, list)) or len(parsed) != 2:
-        raise ValueError(f"无法解析位置字段：{value!r}")
-    return int(parsed[0]), int(parsed[1])
-
-
-def load_adjacent_map(path: str | Path) -> dict[tuple[int, int], dict[str, tuple[int, int] | float]]:
-    """读取 fMRI Pacman 迷宫四方向邻接表。
-
-    输入语义：path 指向包含 ``pos/left/right/up/down`` 列的 CSV 文件。
-    输出语义：返回位置到四方向相邻位置的字典；不可走方向用 ``np.nan`` 表示。
-    关键约束：保留旧工具函数对 tunnel 两端 ``(0, 18)`` 和 ``(30, 18)`` 的补丁。
-    """
-
-    adjacent_frame = pd.read_csv(path)
-    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]] = {}
-    for _, row in adjacent_frame.iterrows():
-        position = parse_position(row["pos"])
-        adjacent_map[position] = {}
-        for direction in DIRECTION_NAMES:
-            value = row[direction]
-            adjacent_map[position][direction] = np.nan if isinstance(value, float) else parse_position(value)
-
-    # 旧工具函数会额外覆盖 tunnel 两端的邻接关系；正式实现显式保留这个数据规则。
-    adjacent_map.setdefault((0, 18), {})
-    adjacent_map.setdefault((30, 18), {})
-    adjacent_map[(0, 18)]["left"] = (30, 18)
-    adjacent_map[(0, 18)]["right"] = (1, 18)
-    adjacent_map[(0, 18)]["up"] = np.nan
-    adjacent_map[(0, 18)]["down"] = np.nan
-    adjacent_map[(30, 18)]["left"] = (29, 18)
-    adjacent_map[(30, 18)]["right"] = (0, 18)
-    adjacent_map[(30, 18)]["up"] = np.nan
-    adjacent_map[(30, 18)]["down"] = np.nan
-    return adjacent_map
-
-
-def normalize_tunnel_position(position: tuple[int, int]) -> tuple[int, int]:
-    """把 tunnel 边界位置映射到旧拟合逻辑使用的内部位置。
-
-    输入语义：position 是 Pacman 当前坐标。
-    输出语义：返回用于邻接判断的坐标。
-    关键约束：只处理旧脚本显式修正的左右 tunnel 边界。
-    """
-
-    if position == (-1, 18) or position == (0, 18):
-        return (1, 18)
-    if position == (31, 18) or position == (30, 18):
-        return (29, 18)
-    return position
-
-
-def is_available_direction(
-    position: tuple[int, int],
-    direction: Any,
-    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
-) -> bool:
-    """判断当前位置的下一步方向是否是合法可走方向。
-
-    输入语义：position 是 Pacman 位置，direction 是下一帧方向字段。
-    输出语义：方向为 NaN、墙或旧邻接表中的 float 时返回 False。
-    关键约束：判断前会按旧逻辑把 tunnel 边界位置映射到内部格子。
-    """
-
-    adjacent_position = adjacent_map[normalize_tunnel_position(position)]
-    if isinstance(direction, float) or adjacent_position[direction] is None or isinstance(adjacent_position[direction], float):
-        return False
-    return True
 
 
 def choose_max_direction(probability: Any) -> int:
@@ -195,97 +94,55 @@ def one_hot_direction(value: str) -> list[int]:
 
 def prepare_fitting_dataframe(
     raw_data: pd.DataFrame,
-    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
+    player: str,
     config: DynamicStrategyFittingConfig | None = None,
 ) -> pd.DataFrame:
-    """校验并读取动态拟合使用的集中 utility DataFrame。
+    """构造单个玩家视角的动态拟合临时表。
 
-    输入语义：raw_data 是 calculate_utility 阶段输出的单被试 DataFrame。
-    输出语义：返回可直接用于拟合的 DataFrame，不新增或改写 Q 相关字段。
-    关键约束：Q 计算、不可走方向修正和 Q_norm 归一化必须在上游阶段完成。
+    输入语义：raw_data 是 05 输出的 joint-state 表，player 是 ``p1`` 或 ``p2``。
+    输出语义：返回包含旧拟合核心字段 ``action_dir/available_dir/*_Q_norm`` 的临时表。
+    关键约束：不解析坐标、不读取地图、不做合法方向重判；这些信息均由上游阶段提供。
     """
 
     config = DynamicStrategyFittingConfig() if config is None else config
-    data = raw_data.copy(deep=True)
-
-    for column in PARSED_POSITION_COLUMNS:
-        if column in data.columns:
-            data[column] = data[column].apply(parse_literal_if_needed)
-
-    required_columns = ["row_id", "DayTrial", "game_id", "action_dir", "available_dir"]
-    required_columns.extend(f"{agent}_Q_norm" for agent in config.agents)
-    missing_columns = [column for column in required_columns if column not in data.columns]
+    required_columns = [
+        "row_id",
+        "DayTrial",
+        "ifscared1",
+        "ifscared2",
+        "energizers",
+        f"{player}_action_dir",
+        f"{player}_available_dir",
+    ]
+    required_columns.extend(f"{player}_{agent}_Q_norm" for agent in config.agents)
+    missing_columns = [column for column in required_columns if column not in raw_data.columns]
     if missing_columns:
         raise ValueError(
-            "动态拟合输入缺少 calculate_utility 阶段应生成的字段："
+            f"{player} 动态拟合输入缺少 calculate_utility 阶段应生成的字段："
             f"{missing_columns}。请先运行 script/05_calculate_utility.py。"
         )
 
-    # 上游阶段已经生成 action_dir/available_dir；这里仅规范缺失值和 dtype。
-    data["action_dir"] = data.action_dir.apply(lambda value: value if value is not None else np.nan)
-    data["available_dir"] = data.available_dir.astype(bool)
+    data = raw_data.copy(deep=True).reset_index(drop=True)
+    # 玩家字段只在临时视角中改名；最终输出仍写回 p1/p2 前缀字段。
+    data["action_dir"] = data[f"{player}_action_dir"].apply(lambda value: value if value is not None else np.nan)
+    data["available_dir"] = data[f"{player}_available_dir"].astype(bool)
     data["row_id"] = pd.to_numeric(data["row_id"], errors="raise").astype("int64")
+
+    # 死亡或缺失玩家位置时保留 joint 行，但该玩家不参与有效动作拟合。
+    alive_column = f"{player}_alive"
+    if alive_column in data.columns:
+        dead_mask = ~data[alive_column].astype(bool)
+        data.loc[dead_mask, "action_dir"] = np.nan
+        data.loc[dead_mask, "available_dir"] = False
+
+    for agent in config.agents:
+        data[f"{agent}_Q_norm"] = data[f"{player}_{agent}_Q_norm"]
     return data
-
-
-def build_internal_fitting_view(
-    data: pd.DataFrame,
-    config: DynamicStrategyFittingConfig,
-    suffix: str,
-) -> tuple[pd.DataFrame, DynamicStrategyFittingConfig, tuple[int, ...], list[str]]:
-    """为动态拟合构造内部工作表，并返回输出向量投影方式。
-
-    输入语义：data 是正式 two-ghost utility 表，config.agents 是对外可见的 7 个 agent。
-    输出语义：默认返回带两个临时占位 Q 列的工作表、9 维内部配置、7 维输出索引和临时列名。
-    关键约束：临时占位列只用于复现旧 9 维随机优化路径，函数返回前必须从结果表删除。
-    """
-
-    # 若调用方显式传入了非默认 agent 列表，则尊重调用方配置，不做旧维度兼容投影。
-    if tuple(config.agents) != DEFAULT_AGENTS:
-        return data.copy(deep=True), config, tuple(range(len(config.agents))), []
-
-    fit_data = data.copy(deep=True)
-    reference_column = f"{DEFAULT_AGENTS[0]}{suffix}"
-    temporary_columns: list[str] = []
-
-    def padding_q_values(reference_q: Any) -> np.ndarray:
-        """根据 global Q 的合法方向形状构造内部兼容占位 Q。
-
-        输入语义：reference_q 是当前行 global 策略的四方向归一化 Q。
-        输出语义：返回同形状数组，可行动作方向为 0，不可行动作保留原始无效值。
-        关键约束：该数组只用于稳定旧 9 维优化路径，不进入正式输出字段。
-        """
-
-        values = np.asarray(reference_q, dtype=float)
-        # 已删除的两个策略位置在旧 two-ghost 数据里没有有效 utility；
-        # 这里仅复现它们对随机优化搜索空间维度的影响。
-        return np.where(np.isfinite(values), 0.0, values)
-
-    for agent in COMPATIBILITY_PADDING_AGENTS:
-        column = f"{agent}{suffix}"
-        fit_data[column] = fit_data[reference_column].apply(padding_q_values)
-        temporary_columns.append(column)
-
-    internal_config = replace(config, agents=INTERNAL_COMPATIBILITY_AGENTS)
-    return fit_data, internal_config, OUTPUT_AGENT_INDICES, temporary_columns
-
-
-def project_agent_vector(values: Any, output_indices: tuple[int, ...]) -> np.ndarray:
-    """把内部 agent 向量投影到正式输出使用的 two-ghost agent 顺序。
-
-    输入语义：values 是内部拟合得到的权重或贡献向量。
-    输出语义：返回只包含正式 7 个 agent 的 NumPy 数组。
-    关键约束：投影只删除内部兼容占位位置，不改变剩余 agent 的相对顺序。
-    """
-
-    array = np.asarray(values, dtype=float)
-    return array[list(output_indices)]
 
 
 def all_directions_nan(
     data: pd.DataFrame,
     context: tuple[int, int],
-    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
 ) -> bool:
     """判断一个段落是否没有任何可拟合方向行。
 
@@ -467,7 +324,6 @@ def context_needs_merge(
     event: int,
     context: tuple[int, int],
     trial_data: pd.DataFrame,
-    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
     stay_length: int,
 ) -> bool:
     """判断一个段落是否需要并入相邻段。
@@ -483,9 +339,9 @@ def context_needs_merge(
     if event == 0 and length < stay_length:
         return True
     if event in (1, 2):
-        return all_directions_nan(trial_data, context, adjacent_map)
+        return all_directions_nan(trial_data, context)
     if event == 3:
-        return not (length > 3 and all_directions_nan(trial_data, context, adjacent_map) == False)
+        return not (length > 3 and all_directions_nan(trial_data, context) == False)
     raise ValueError(f"未知段落事件类型：{event}")
 
 
@@ -493,7 +349,6 @@ def merge_short_contexts(
     contexts: list[tuple[int, int]],
     events: list[int],
     trial_data: pd.DataFrame,
-    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
     stay_length: int,
 ) -> tuple[list[tuple[int, int]], list[bool]]:
     """按事件类型和长度合并不可独立拟合的短段落。
@@ -508,7 +363,7 @@ def merge_short_contexts(
     event_acceptance = {0: [1, 2, 3], 1: [1], 2: [0, 2, 3], 3: [0, 1, 2, 3]}
 
     for index in range(len(contexts)):
-        need_merge.append(context_needs_merge(events[index], contexts[index], trial_data, adjacent_map, stay_length))
+        need_merge.append(context_needs_merge(events[index], contexts[index], trial_data, stay_length))
         if events[index] == 0 and (contexts[index][1] - contexts[index][0]) >= stay_length:
             accept_merge.append([])
         else:
@@ -532,7 +387,7 @@ def merge_short_contexts(
             can_be_accepted = True
 
         if can_be_accepted is False:
-            if all_directions_nan(trial_data, contexts[index], adjacent_map) is False:
+            if all_directions_nan(trial_data, contexts[index]) is False:
                 need_merge[index] = False
                 index += 1
                 continue
@@ -554,7 +409,7 @@ def merge_short_contexts(
             contexts[index - 1] = (contexts[index - 1][0], contexts[index][1])
             accept_merge[index - 1] = event_acceptance[events[index - 1]]
             need_merge[index - 1] = context_needs_merge(
-                events[index - 1], contexts[index - 1], trial_data, adjacent_map, stay_length
+                events[index - 1], contexts[index - 1], trial_data, stay_length
             )
             contexts = contexts[:index] + contexts[index + 1 :]
             events = events[:index] + events[index + 1 :]
@@ -565,7 +420,7 @@ def merge_short_contexts(
             contexts[index] = (contexts[index][0], contexts[index + 1][1])
             events[index] = merge_event_labels(events[index], events[index + 1])
             accept_merge[index] = event_acceptance[events[index]]
-            need_merge[index] = context_needs_merge(events[index], contexts[index], trial_data, adjacent_map, stay_length)
+            need_merge[index] = context_needs_merge(events[index], contexts[index], trial_data, stay_length)
             contexts = contexts[: index + 1] + contexts[index + 2 :]
             events = events[: index + 1] + events[index + 2 :]
             accept_merge = accept_merge[: index + 1] + accept_merge[index + 2 :]
@@ -576,9 +431,9 @@ def merge_short_contexts(
     is_nan = [event == 0 for event in events]
     cannot_fit: list[bool] = []
     for index in range(len(contexts)):
-        if context_needs_merge(events[index], contexts[index], trial_data, adjacent_map, stay_length) is False:
+        if context_needs_merge(events[index], contexts[index], trial_data, stay_length) is False:
             cannot_fit.append(False)
-        elif all_directions_nan(trial_data, contexts[index], adjacent_map) is False:
+        elif all_directions_nan(trial_data, contexts[index]) is False:
             cannot_fit.append(False)
         else:
             cannot_fit.append(True)
@@ -612,7 +467,6 @@ def merge_event_labels(left_event: int, right_event: int) -> int:
 
 def build_context_segments(
     prepared_data: pd.DataFrame,
-    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
     config: DynamicStrategyFittingConfig | None = None,
 ) -> tuple[list[tuple[int, int]], list[bool], list[int], list[int]]:
     """为完整被试数据构造全局段落列表。
@@ -644,7 +498,7 @@ def build_context_segments(
 
         contexts = list(zip([0] + list(cutoffs[:-1]), cutoffs))
         events, is_nan = label_context_events(trial_data.action_dir, contexts, eat_energizers, eat_ghost)
-        contexts, is_nan = merge_short_contexts(contexts, events, trial_data, adjacent_map, config.stay_length)
+        contexts, is_nan = merge_short_contexts(contexts, events, trial_data, config.stay_length)
         global_contexts = [(context[0] + level_offset, context[1] + level_offset) for context in contexts]
         all_is_nan += is_nan
         all_contexts += global_contexts
@@ -661,12 +515,66 @@ def build_agent_q_values(data: pd.DataFrame, agents: tuple[str, ...], suffix: st
     """
 
     q_columns = [f"{agent}{suffix}" for agent in agents]
-    pre_estimation = data[q_columns].values
-    q_values = np.zeros((data.shape[0], 4, len(q_columns)))
-    for sample_index in range(data.shape[0]):
-        for agent_index in range(len(q_columns)):
-            q_values[sample_index, :, agent_index] = pre_estimation[sample_index][agent_index]
-    return q_values
+    # 每个 Q 单元都是长度为 4 的方向数组。这里一次性堆叠成
+    # sample x direction x agent，避免在每个 context 内反复 Python 双层循环。
+    return np.stack(
+        [np.stack(data[column].to_numpy()).astype(float) for column in q_columns],
+        axis=2,
+    )
+
+
+def weighted_direction_q(agent_q_values: np.ndarray, weights: Any) -> np.ndarray:
+    """用策略权重合成四方向 Q。
+
+    输入语义：agent_q_values 形状为 ``(样本数, 4, 策略数)``，weights 是策略权重。
+    输出语义：返回形状为 ``(样本数, 4)`` 的合成方向 Q。
+    关键约束：保持旧逻辑中 ``0 * -inf`` 先产生 NaN、再统一转为 ``-inf`` 的行为。
+    """
+
+    with np.errstate(invalid="ignore"):
+        direction_q_values = agent_q_values @ weights
+    direction_q_values[np.isnan(direction_q_values)] = -np.inf
+    return direction_q_values
+
+
+def expected_argmax_accuracy(direction_q_values: np.ndarray, true_direction: np.ndarray) -> float:
+    """计算真实方向在最大 Q 并列集合中的期望正确数。
+
+    输入语义：direction_q_values 是每个样本的四方向合成 Q，true_direction 是真实方向索引。
+    输出语义：返回旧循环逻辑中的 accuracy 累加值；若真实方向与 k 个最大方向并列，
+    贡献 ``1/k``。
+    关键约束：真实方向为 ``-inf`` 时贡献 0，与旧实现保持一致。
+    """
+
+    if direction_q_values.shape[0] == 0:
+        return 0.0
+    row_indices = np.arange(direction_q_values.shape[0])
+    target_values = direction_q_values[row_indices, true_direction]
+    max_values = np.max(direction_q_values, axis=1)
+    tie_counts = np.sum(direction_q_values == max_values[:, None], axis=1)
+    correct_mask = (~np.isinf(target_values)) & (target_values == max_values)
+    return float(np.sum(np.where(correct_mask, 1 / tie_counts, 0.0)))
+
+
+def weighted_accuracy_objective(
+    weights: Any,
+    agent_q_values: np.ndarray,
+    true_direction: np.ndarray,
+    penalty: float,
+) -> float:
+    """计算单个 context 的权重拟合目标。
+
+    输入语义：weights 是 GA 候选权重，agent_q_values/true_direction 是 context 内预计算数据。
+    输出语义：返回旧 GA likelihood 使用的目标值，数值越小越好。
+    关键约束：该函数只把逐样本循环改成 NumPy 向量化，不改变目标函数定义。
+    """
+
+    sample_count = agent_q_values.shape[0]
+    if sample_count == 0:
+        return np.inf
+    direction_q_values = weighted_direction_q(agent_q_values, weights)
+    accuracy = expected_argmax_accuracy(direction_q_values, true_direction)
+    return -accuracy / sample_count + penalty * np.sum(np.abs(weights))
 
 
 def negative_likelihood(
@@ -689,24 +597,9 @@ def negative_likelihood(
     agent_weights = [weights[index] for index in range(len(weights))]
     sample_count = data.shape[0]
     agent_q_values = build_agent_q_values(data, agents, suffix)
-    # 0 权重乘以 -inf 会产生 NaN，旧流程随后统一把 NaN 当作不可走方向处理。
-    with np.errstate(invalid="ignore"):
-        direction_q_values = agent_q_values @ agent_weights
-    direction_q_values[np.isnan(direction_q_values)] = -np.inf
+    direction_q_values = weighted_direction_q(agent_q_values, agent_weights)
     true_directions = true_prob.apply(choose_max_direction).values
-    accuracy = 0
-    for sample_index in range(sample_count):
-        if np.isnan(direction_q_values[sample_index][0]):
-            continue
-        sample_q = direction_q_values[sample_index]
-        true_direction = true_directions[sample_index]
-        if np.isinf(sample_q[true_direction]):
-            accuracy += 0
-        else:
-            max_value = np.max(sample_q)
-            max_indices = np.where(sample_q == max_value)[0]
-            if sample_q[true_direction] == max_value:
-                accuracy += 1 / len(max_indices)
+    accuracy = expected_argmax_accuracy(direction_q_values, true_directions)
     objective = (1 - accuracy / sample_count) * 1000 + np.sum(np.abs(agent_weights))
     if return_trajectory:
         return objective, direction_q_values
@@ -761,7 +654,6 @@ def fit_one_segment(
     contexts: list[tuple[int, int]],
     is_nan: list[bool],
     data: pd.DataFrame,
-    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
     config: DynamicStrategyFittingConfig | None = None,
     suffix: str = "_Q_norm",
     segment_seed: int | None = None,
@@ -805,24 +697,12 @@ def fit_one_segment(
     def likelihood(agent_weights: Any) -> float:
         """计算 GA 优化器调用的段落目标值。"""
 
-        # 与 negative_likelihood 相同，先允许 -inf * 0 产生 NaN，再按旧逻辑转成 -inf。
-        with np.errstate(invalid="ignore"):
-            direction_q_values = agent_q_values @ agent_weights
-        direction_q_values[np.isnan(direction_q_values)] = -np.inf
-        accuracy = 0
-        for sample_index in range(sample_count):
-            if np.isnan(direction_q_values[sample_index][0]):
-                continue
-            sample_q = direction_q_values[sample_index]
-            target_direction = true_direction[sample_index]
-            if np.isinf(sample_q[target_direction]):
-                accuracy += 0
-            else:
-                max_value = np.max(sample_q)
-                max_indices = np.where(sample_q == max_value)[0]
-                if sample_q[target_direction] == max_value:
-                    accuracy += 1 / len(max_indices)
-        return -accuracy / sample_count + config.weight_penalty * np.sum(np.abs(agent_weights))
+        return weighted_accuracy_objective(
+            agent_weights,
+            agent_q_values,
+            true_direction,
+            config.weight_penalty,
+        )
 
     patch_multiprocessing_start_method_for_sko()
     from sko.GA import GA
@@ -886,7 +766,6 @@ def fit_all_segments(
     data: pd.DataFrame,
     contexts: list[tuple[int, int]],
     is_nan: list[bool],
-    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
     config: DynamicStrategyFittingConfig | None = None,
     suffix: str = "_Q_norm",
 ) -> tuple[list[Any], Any, np.ndarray, np.ndarray, np.ndarray]:
@@ -907,13 +786,13 @@ def fit_all_segments(
     is_vague = np.array([False] * len(data))
 
     if config.segment_workers > 1:
-        segment_results = fit_segments_in_parallel(data, contexts, is_nan, adjacent_map, config, suffix)
+        segment_results = fit_segments_in_parallel(data, contexts, is_nan, config, suffix)
     else:
         segment_results = []
         for index in range(len(contexts)):
             segment_seed = config.random_seed + index if config.random_seed is not None and config.use_segment_seed else None
             segment_results.append(
-                fit_one_segment(index, contexts, is_nan, data, adjacent_map, config, suffix=suffix, segment_seed=segment_seed)
+                fit_one_segment(index, contexts, is_nan, data, config, suffix=suffix, segment_seed=segment_seed)
             )
 
     for index, result in enumerate(segment_results):
@@ -936,7 +815,6 @@ def fit_all_segments(
 _SEGMENT_DATA: pd.DataFrame | None = None
 _SEGMENT_CONTEXTS: list[tuple[int, int]] | None = None
 _SEGMENT_IS_NAN: list[bool] | None = None
-_SEGMENT_ADJACENT_MAP: dict[tuple[int, int], dict[str, tuple[int, int] | float]] | None = None
 _SEGMENT_CONFIG: DynamicStrategyFittingConfig | None = None
 _SEGMENT_SUFFIX: str = "_Q_norm"
 
@@ -945,7 +823,6 @@ def fit_segments_in_parallel(
     data: pd.DataFrame,
     contexts: list[tuple[int, int]],
     is_nan: list[bool],
-    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
     config: DynamicStrategyFittingConfig,
     suffix: str,
 ) -> list[dict[str, Any] | None]:
@@ -963,7 +840,7 @@ def fit_segments_in_parallel(
     with ProcessPoolExecutor(
         max_workers=min(config.segment_workers, len(tasks)),
         initializer=_init_segment_worker,
-        initargs=(data, contexts, is_nan, adjacent_map, config, suffix),
+        initargs=(data, contexts, is_nan, config, suffix),
     ) as executor:
         return list(executor.map(_fit_segment_worker_task, tasks))
 
@@ -972,22 +849,20 @@ def _init_segment_worker(
     data: pd.DataFrame,
     contexts: list[tuple[int, int]],
     is_nan: list[bool],
-    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
     config: DynamicStrategyFittingConfig,
     suffix: str,
 ) -> None:
     """初始化段落级并行 worker 的只读上下文。
 
-    输入语义：父进程传入完整文件数据、段落列表、邻接表和配置。
+    输入语义：父进程传入完整文件数据、段落列表和配置。
     输出语义：写入 worker 进程全局变量，减少每个段落任务的重复 pickle。
     关键约束：worker 内只读这些对象，不跨段落写共享状态。
     """
 
-    global _SEGMENT_DATA, _SEGMENT_CONTEXTS, _SEGMENT_IS_NAN, _SEGMENT_ADJACENT_MAP, _SEGMENT_CONFIG, _SEGMENT_SUFFIX
+    global _SEGMENT_DATA, _SEGMENT_CONTEXTS, _SEGMENT_IS_NAN, _SEGMENT_CONFIG, _SEGMENT_SUFFIX
     _SEGMENT_DATA = data
     _SEGMENT_CONTEXTS = contexts
     _SEGMENT_IS_NAN = is_nan
-    _SEGMENT_ADJACENT_MAP = adjacent_map
     _SEGMENT_CONFIG = config
     _SEGMENT_SUFFIX = suffix
 
@@ -1004,7 +879,6 @@ def _fit_segment_worker_task(task: tuple[int, int | None]) -> dict[str, Any] | N
         _SEGMENT_DATA is None
         or _SEGMENT_CONTEXTS is None
         or _SEGMENT_IS_NAN is None
-        or _SEGMENT_ADJACENT_MAP is None
         or _SEGMENT_CONFIG is None
     ):
         raise RuntimeError("段落 worker 尚未初始化。")
@@ -1014,99 +888,173 @@ def _fit_segment_worker_task(task: tuple[int, int | None]) -> dict[str, Any] | N
         _SEGMENT_CONTEXTS,
         _SEGMENT_IS_NAN,
         _SEGMENT_DATA,
-        _SEGMENT_ADJACENT_MAP,
         _SEGMENT_CONFIG,
         suffix=_SEGMENT_SUFFIX,
         segment_seed=segment_seed,
     )
 
-def fit_dynamic_strategy_dataframe(
-    raw_data: pd.DataFrame,
-    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
-    config: DynamicStrategyFittingConfig | None = None,
-) -> pd.DataFrame:
-    """对单个被试 DataFrame 执行完整动态策略拟合。
+def discover_player_prefixes(data: pd.DataFrame, config: DynamicStrategyFittingConfig) -> list[str]:
+    """识别当前 05 输出中可进行 06 拟合的玩家。
 
-    输入语义：raw_data 是 calculate_utility 输出表；adjacent_map 是 fMRI 邻接表。
-    输出语义：返回追加 weight/normalized_weight/prediction_correct 等列的 WeightData 表。
-    关键约束：拟合所有上下文段落；随机过程由 config.random_seed 控制。
+    输入语义：data 是 joint-state utility 表，config.agents 给出需要的策略名。
+    输出语义：返回字段完整的玩家前缀列表，例如 ``["p1", "p2"]``。
+    关键约束：单人数据没有 ``p2_*`` 时跳过 p2，不生成 p2 权重字段。
     """
 
-    config = DynamicStrategyFittingConfig() if config is None else config
+    players: list[str] = []
+    for player in PLAYER_PREFIXES:
+        required_columns = {f"{player}_action_dir", f"{player}_available_dir"}
+        required_columns.update(f"{player}_{agent}_Q_norm" for agent in config.agents)
+        if required_columns.isdisjoint(data.columns):
+            continue
+        missing_columns = sorted(required_columns - set(data.columns))
+        if missing_columns:
+            raise ValueError(f"{player} 动态拟合字段不完整，缺少：{missing_columns}")
+        players.append(player)
+    if not players:
+        raise ValueError("未找到可拟合玩家字段，至少需要 p1_action_dir/p1_available_dir/p1_*_Q_norm。")
+    return players
+
+
+def initialize_player_result(index: pd.Index, player: str) -> pd.DataFrame:
+    """创建某个玩家的 06 输出字段空表。
+
+    输入语义：index 与 joint-state 输入表一致，player 是 ``p1`` 或 ``p2``。
+    输出语义：返回包含 ``p1_weight`` 等字段的 DataFrame，默认值为 NaN。
+    关键约束：所有列使用 object dtype，便于保存 list、tuple、bool 和 NaN 混合值。
+    """
+
+    output = pd.DataFrame(index=index)
+    for column in PLAYER_RESULT_COLUMNS:
+        output[f"{player}_{column}"] = pd.Series([np.nan] * len(index), index=index, dtype=object)
+    return output
+
+
+def fit_player_strategy_dataframe(
+    raw_data: pd.DataFrame,
+    player: str,
+    config: DynamicStrategyFittingConfig,
+) -> pd.DataFrame:
+    """为一个玩家拟合动态策略权重并返回玩家前缀结果列。
+
+    输入语义：raw_data 是 05 输出的 joint-state 表，player 指定当前玩家。
+    输出语义：返回 ``<player>_weight``、``<player>_trial_context`` 等结果列。
+    关键约束：死亡和非法动作行不会被作为有效动作拟合，但 joint 行仍完整保留。
+    """
+
     if config.random_seed is not None:
         np.random.seed(config.random_seed)
 
-    print("=== Dynamic Strategy Fitting ====")
-    print("Start reading data...")
-    data = prepare_fitting_dataframe(raw_data, adjacent_map, config)
+    print(f"=== Dynamic Strategy Fitting: {player} ====")
+    fit_data = prepare_fitting_dataframe(raw_data, player, config)
     suffix = "_Q_norm"
-    fit_data, fit_config, output_agent_indices, temporary_q_columns = build_internal_fitting_view(data, config, suffix)
-    print("Finished reading trial data.")
     trial_names = np.unique(fit_data.DayTrial.values)
     print("The num of trials : ", len(trial_names))
     print("-" * 50)
 
-    # 拟合切段需要把非法动作当作 NaN 处理，但正式输出仍保留上游 action_dir 原值。
-    original_action_dir = fit_data["action_dir"].copy(deep=True)
+    # context 划分和拟合阶段只把合法动作当作有效观测；保存结果时不改写原始玩家动作字段。
     invalid_direction_indices = np.where(fit_data["available_dir"] == False)[0]
     fit_data.loc[fit_data.index[invalid_direction_indices], "action_dir"] = [np.nan] * len(invalid_direction_indices)
 
-    contexts, is_nan, eat_energizers, eat_ghost = build_context_segments(fit_data, adjacent_map, fit_config)
+    contexts, is_nan, _eat_energizers, _eat_ghost = build_context_segments(fit_data, config)
     result_list, _, is_correct, predicted_direction, is_vague = fit_all_segments(
         fit_data,
         contexts,
         is_nan,
-        adjacent_map,
-        fit_config,
+        config,
         suffix=suffix,
     )
 
+    output = initialize_player_result(raw_data.index, player)
     trial_weight: list[Any] = []
     trial_context: list[tuple[int, int]] = []
     trial_normalized_weight: list[Any] = []
     trial_is_stay: list[bool] = []
     for result_index, result in enumerate(result_list):
-        internal_weight = np.asarray(result[: len(fit_config.agents)], dtype=float)
-        output_weight = project_agent_vector(internal_weight, output_agent_indices).tolist()
+        weight = np.asarray(result[: len(config.agents)], dtype=float)
         start = result[-2]
         end = result[-1]
         for _ in range(start, end):
             trial_context.append((start, end))
-            trial_weight.append(output_weight)
+            trial_weight.append(weight.tolist())
             trial_is_stay.append(is_nan[result_index])
-            if is_nan[result_index] is False and np.sum(internal_weight) != 0:
-                normalized_weight = (internal_weight - np.min(internal_weight)) / (np.max(internal_weight) - np.min(internal_weight))
-                trial_normalized_weight.append(project_agent_vector(normalized_weight, output_agent_indices))
+            if is_nan[result_index] is False and np.sum(weight) != 0 and np.max(weight) != np.min(weight):
+                normalized_weight = (weight - np.min(weight)) / (np.max(weight) - np.min(weight))
+                trial_normalized_weight.append(normalized_weight.tolist())
             else:
-                trial_normalized_weight.append(copy.deepcopy(output_weight))
+                trial_normalized_weight.append(copy.deepcopy(weight.tolist()))
 
-    if len(trial_weight) != fit_data.shape[0]:
-        fit_data["weight"] = [np.nan for _ in range(fit_data.shape[0])]
-        fit_data["normalized_weight"] = [np.nan for _ in range(fit_data.shape[0])]
-        fit_data["prediction_correct"] = [np.nan for _ in range(fit_data.shape[0])]
-    elif len(trial_weight) > 0:
-        fit_data["weight"] = trial_weight
-        fit_data["normalized_weight"] = trial_normalized_weight
-        fit_data["prediction_correct"] = is_correct
-        fit_data["predict_dir"] = predicted_direction
-        fit_data["trial_context"] = trial_context
-        fit_data["eat_energizer"] = [False] * len(fit_data)
-        fit_data.loc[fit_data.index[eat_energizers], "eat_energizer"] = [True] * len(eat_energizers)
-        fit_data["eat_ghost"] = [False] * len(fit_data)
-        fit_data.loc[fit_data.index[eat_ghost], "eat_ghost"] = [True] * len(eat_ghost)
-        fit_data["is_stay"] = trial_is_stay
-        fit_data["is_vague"] = is_vague
+    if len(trial_weight) == fit_data.shape[0] and len(trial_weight) > 0:
+        output[f"{player}_weight"] = trial_weight
+        output[f"{player}_normalized_weight"] = trial_normalized_weight
+        output[f"{player}_prediction_correct"] = is_correct
+        output[f"{player}_predict_dir"] = predicted_direction
+        output[f"{player}_trial_context"] = trial_context
+        output[f"{player}_is_stay"] = trial_is_stay
+        output[f"{player}_is_vague"] = is_vague
         print(np.sum(is_vague) / len(fit_data))
 
-    fit_data["action_dir"] = original_action_dir.to_numpy()
-    print("Finished fitting.")
-    return fit_data.drop(columns=temporary_q_columns)
+    print(f"Finished fitting {player}.")
+    return output
+
+
+def append_public_event_columns(data: pd.DataFrame) -> pd.DataFrame:
+    """为 joint-state 输出添加公共局面事件标记。
+
+    输入语义：data 是 05 utility 输出或已追加玩家权重字段的 joint-state 表。
+    输出语义：返回追加 ``eat_energizer`` 和 ``eat_ghost`` 的 DataFrame。
+    关键约束：这两个事件来自公共游戏状态，不归属于 p1 或 p2；它们会参与两个玩家
+    各自的 context 划分，但保存时只保留一份，避免误解为玩家本人触发事件。
+    """
+
+    required_columns = {"DayTrial", "energizers", "ifscared1", "ifscared2"}
+    missing_columns = sorted(required_columns - set(data.columns))
+    if missing_columns:
+        raise ValueError(f"公共事件标记缺少字段：{missing_columns}")
+
+    result = data.copy(deep=True)
+    result["eat_energizer"] = False
+    result["eat_ghost"] = False
+    for _, trial_data in result.groupby("DayTrial", sort=False):
+        energizer_count = trial_data["energizers"].apply(lambda value: len(value) if not isinstance(value, float) else 0)
+        eat_energizer_indices = energizer_count.diff().where(lambda value: value < 0).dropna().index
+        eat_ghost_indices = (
+            (
+                ((trial_data.ifscared1 == 3) & (trial_data.ifscared1.diff() < 0))
+                | ((trial_data.ifscared2 == 3) & (trial_data.ifscared2.diff() < 0))
+            )
+            .where(lambda value: value == True)
+            .dropna()
+            .index
+        )
+        result.loc[eat_energizer_indices, "eat_energizer"] = True
+        result.loc[eat_ghost_indices, "eat_ghost"] = True
+    return result
+
+
+def fit_dynamic_strategy_dataframe(
+    raw_data: pd.DataFrame,
+    config: DynamicStrategyFittingConfig | None = None,
+) -> pd.DataFrame:
+    """对单个 joint-state DataFrame 执行完整动态策略拟合。
+
+    输入语义：raw_data 是 05 utility 输出表，包含 p1/p2 的 Q_norm 字段。
+    输出语义：返回保留原 joint-state 字段、追加玩家前缀权重字段的 WeightData 表。
+    关键约束：每个玩家分别构造 context 和拟合权重，不拆文件、不删除 joint 行。
+    """
+
+    config = DynamicStrategyFittingConfig() if config is None else config
+    result = append_public_event_columns(raw_data.reset_index(drop=True).copy(deep=True))
+    for player in discover_player_prefixes(result, config):
+        player_output = fit_player_strategy_dataframe(result, player, config)
+        for column in player_output.columns:
+            result[column] = player_output[column].to_numpy()
+    return result
 
 
 def process_dynamic_strategy_file(
     input_path: str | Path,
     output_path: str | Path,
-    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
     config: DynamicStrategyFittingConfig | None = None,
     file_index: int = 0,
 ) -> dict[str, Any]:
@@ -1140,14 +1088,14 @@ def process_dynamic_strategy_file(
     else:
         file_config = config
 
-    result = fit_dynamic_strategy_dataframe(raw_data, adjacent_map, file_config)
+    result = fit_dynamic_strategy_dataframe(raw_data, file_config)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     with output_file.open("wb") as file:
         pickle.dump(result, file)
     print("Finished saving data.")
     return {
-        "input_file": input_file.name,
-        "output_file": output_file.name,
+        "input_file": str(input_file),
+        "output_file": str(output_file),
         "rows": int(result.shape[0]),
         "columns": int(result.shape[1]),
         "seed": file_config.random_seed,
@@ -1157,14 +1105,13 @@ def process_dynamic_strategy_file(
 def process_dynamic_strategy_directory(
     input_dir: str | Path,
     output_dir: str | Path,
-    adjacent_map_path: str | Path,
     config: DynamicStrategyFittingConfig | None = None,
     workers: int = 1,
 ) -> list[dict[str, Any]]:
-    """批量处理集中 utility 目录。
+    """批量处理 05 utility 嵌套目录。
 
-    输入语义：input_dir 是 calculate_utility 的扁平 pickle 目录，output_dir 是 WeightData 输出目录。
-    输出语义：每个输入文件写出同名 pickle，返回摘要列表。
+    输入语义：input_dir 是 ``comp/*.pkl``、``coop/*.pkl`` 等任务子目录结构。
+    输出语义：每个输入文件按相同相对路径写到 output_dir，返回摘要列表。
     关键约束：文件间独立；设置 seed 时按排序后的文件序号派生文件级 seed。
     """
 
@@ -1173,17 +1120,15 @@ def process_dynamic_strategy_directory(
     output_dir = Path(output_dir)
     if not input_dir.is_dir():
         raise FileNotFoundError(f"输入目录不存在：{input_dir}")
-    input_files = sorted(input_dir.glob("*.pkl"))
+    input_files = sorted(path for path in input_dir.glob("*/*.pkl") if path.is_file())
     if not input_files:
-        raise FileNotFoundError(f"输入目录中没有 pickle 文件：{input_dir}")
+        raise FileNotFoundError(f"输入目录中没有嵌套 pickle 文件：{input_dir}")
 
-    adjacent_map = load_adjacent_map(adjacent_map_path)
     output_dir.mkdir(parents=True, exist_ok=True)
     tasks = [
         (
             input_file,
-            output_dir / input_file.name,
-            adjacent_map,
+            output_dir / input_file.relative_to(input_dir),
             config,
             file_index,
         )
@@ -1199,17 +1144,16 @@ def _process_dynamic_strategy_task(
     task: tuple[
         Path,
         Path,
-        dict[tuple[int, int], dict[str, tuple[int, int] | float]],
         DynamicStrategyFittingConfig,
         int,
     ],
 ) -> dict[str, Any]:
     """执行目录级并行中的单个文件任务。
 
-    输入语义：task 包含输入路径、输出路径、邻接表、配置和文件序号。
+    输入语义：task 包含输入路径、输出路径、配置和文件序号。
     输出语义：返回 ``process_dynamic_strategy_file`` 的摘要。
     关键约束：保持顶层函数，便于 multiprocessing 序列化。
     """
 
-    input_path, output_path, adjacent_map, config, file_index = task
-    return process_dynamic_strategy_file(input_path, output_path, adjacent_map, config, file_index=file_index)
+    input_path, output_path, config, file_index = task
+    return process_dynamic_strategy_file(input_path, output_path, config, file_index=file_index)

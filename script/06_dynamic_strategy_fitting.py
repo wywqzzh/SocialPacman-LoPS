@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""运行人类 fMRI 动态策略权重拟合。"""
+"""运行 Social Pacman 动态策略权重拟合。"""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from LoPS.dynamic_strategy_fitting import (  # noqa: E402
 def parse_args() -> argparse.Namespace:
     """解析动态策略拟合命令行参数。
 
-    输入语义：允许覆盖集中 utility 输入目录、输出目录、邻接表、随机种子、并行数和 GA 参数。
+    输入语义：允许覆盖集中 utility 输入目录、输出目录、随机种子、并行数和 GA 参数。
     输出语义：返回可直接构造配置并驱动目录批处理的参数对象。
     关键约束：默认路径只指向当前 LoPS 仓库 data 目录，不依赖旧项目路径。
     """
@@ -45,12 +45,6 @@ def parse_args() -> argparse.Namespace:
         default=data_root / "06_weight_data",
         help="动态拟合 WeightData 输出目录。",
     )
-    parser.add_argument(
-        "--adjacent-map",
-        type=Path,
-        default=data_root / "constant_data" / "adjacent_map_fmri.csv",
-        help="fMRI 邻接表 CSV。",
-    )
     parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1), help="文件级并行进程数。")
     parser.add_argument("--segment-workers", type=int, default=1, help="单文件内部段落级并行进程数。")
     parser.add_argument(
@@ -59,7 +53,7 @@ def parse_args() -> argparse.Namespace:
         help="为每个段落使用 seed+file_index+segment_index 的固定随机种子。",
     )
     parser.add_argument("--seed", type=int, default=20260610, help="随机种子；每个文件会加上排序序号。")
-    parser.add_argument("--stay-length", type=int, default=6, help="判定 stay 段的最小连续长度。")
+    parser.add_argument("--stay-length", type=int, default=4, help="判定 stay 段的最小连续长度。")
     parser.add_argument("--ga-population-size", type=int, default=100, help="GA 种群大小。")
     parser.add_argument("--ga-iterations", type=int, default=500, help="GA 迭代次数。")
     parser.add_argument("--ga-mutation-probability", type=float, default=0.01, help="GA 变异概率。")
@@ -74,8 +68,7 @@ def build_config(args: argparse.Namespace) -> DynamicStrategyFittingConfig:
 
     输入语义：args 来自 parse_args。
     输出语义：返回 DynamicStrategyFittingConfig。
-    关键约束：正式输出只包含 two-ghost 数据需要的 7 个策略；模块内部会按需补齐
-    临时兼容维度，以复现旧随机优化路径。
+    关键约束：拟合维度直接等于 agents 数量，后续新增策略时只需要扩展配置。
     """
 
     return DynamicStrategyFittingConfig(
@@ -101,7 +94,6 @@ def main() -> None:
     summaries = process_dynamic_strategy_directory(
         input_dir=args.input_dir,
         output_dir=args.output_dir,
-        adjacent_map_path=args.adjacent_map,
         config=config,
         workers=args.workers,
     )

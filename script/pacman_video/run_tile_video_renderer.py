@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""用 04 阶段 tile 数据绘制简易 Pacman 游戏视频。
+"""用 07 阶段修正策略结果数据绘制简易 Pacman 游戏视频。
 
-本脚本直接读取 ``data/04_corrected_tile_data/{task}/{session}.pkl``，选择其中
+本脚本直接读取 ``data/07_corrected_weight_data/{task}/{session}.pkl``，选择其中
 一个 ``DayTrial`` 作为一个 game，把每条 tile 行渲染成一帧视频。地图背景来自
 ``data/constant_data/map_constants.pkl`` 的可走点集合：黑色表示墙，白色表示
-可以走的位置；每帧额外绘制当前剩余的豆子、energizer、两个 Pacman 和两个 ghost。
+可以走的位置；每帧额外绘制当前剩余的豆子、energizer、两个 Pacman、两个 ghost，
+并在地图上方左右分开显示两个玩家当前拟合出的单个策略。
 
-这个脚本是检查 04 处理结果的轻量可视化工具，不依赖旧的 render table、grammar
-或逐帧渲染链路。
+这个脚本是检查 07 修正策略结果和行为轨迹的轻量可视化工具，不依赖旧的 render table、
+grammar 或逐帧渲染链路。
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from LoPS.pacman_video.frame_renderer import DIR_DOWN, direction_enum, quadratic_path
 
-DEFAULT_TILE_ROOT = PROJECT_ROOT / "data/04_corrected_tile_data"
+DEFAULT_TILE_ROOT = PROJECT_ROOT / "data/07_corrected_weight_data"
 DEFAULT_MAP_CONSTANTS = PROJECT_ROOT / "data/constant_data/map_constants.pkl"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/pacman_video/tile_video"
 DEFAULT_FRAME_OUTPUT_DIR = PROJECT_ROOT / "data/pacman_video/tile_frame_images"
@@ -47,6 +48,39 @@ DISPLAY_LABEL_COLOR = (0, 0, 0)
 DISPLAY_WALL_GRID_COLOR = (235, 235, 235)
 POSITION_COLUMNS = ("p1_pos", "p2_pos", "ghost1Pos", "ghost2Pos")
 ITEM_COLUMNS = ("beans", "energizers")
+STRATEGY_AGENTS = (
+    "global",
+    "local",
+    "evade_blinky",
+    "evade_clyde",
+    "approach",
+    "energizer",
+    "no_energizer",
+)
+STRATEGY_DISPLAY_NAMES = {
+    "global": "global",
+    "local": "local",
+    "evade_blinky": "evade",
+    "evade_clyde": "evade",
+    "approach": "approach",
+    "energizer": "energizer",
+    "no_energizer": "no energizer",
+    "stay": "stay",
+    "vague": "vague",
+}
+STRATEGY_COLORS = {
+    # 颜色沿用旧 GenerateSimpleVideo_fMRI_gram.py 中每个单测量策略块的配色；
+    # 新增的 no_energizer 使用旧脚本预留的深蓝色。
+    "global": (69, 180, 61),
+    "local": (215, 25, 28),
+    "evade_blinky": (254, 175, 97),
+    "evade_clyde": (254, 175, 97),
+    "approach": (131, 106, 183),
+    "energizer": (128, 179, 255),
+    "no_energizer": (5, 21, 161),
+    "stay": (45, 27, 17),
+    "vague": (138, 134, 138),
+}
 VIDEO_GHOST_HOUSE_DISPLAY_POSITIONS = {
     (14, 16),
     (15, 16),
@@ -111,6 +145,98 @@ def parse_position_list(value: Any) -> list[tuple[int, int]]:
     return [parse_grid_position(item) for item in value]
 
 
+def parse_numeric_vector(value: Any) -> np.ndarray:
+    """解析 06 拟合结果中的权重向量。
+
+    输入语义：value 通常是 ``p1_normalized_weight`` 或 ``p2_normalized_weight``，
+    可以是 list/tuple/numpy 数组，也可能是字符串形式的列表。
+    输出语义：返回一维 float 数组；空值或无法形成有效向量时返回空数组。
+    关键约束：该函数只做安全字面量解析，不使用 eval；向量长度不足时由上层
+    策略判断函数按可用长度处理。
+    """
+
+    if value is None:
+        return np.asarray([], dtype=float)
+    if isinstance(value, float) and pd.isna(value):
+        return np.asarray([], dtype=float)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.lower() in {"", "nan", "none"}:
+            return np.asarray([], dtype=float)
+        value = ast.literal_eval(stripped)
+    if isinstance(value, np.ndarray):
+        vector = value.astype(float).reshape(-1)
+    elif isinstance(value, (list, tuple)):
+        vector = np.asarray(value, dtype=float).reshape(-1)
+    else:
+        return np.asarray([], dtype=float)
+    return vector[~np.isnan(vector)]
+
+
+def bool_from_row_value(value: Any) -> bool:
+    """把 DataFrame 行中的布尔字段转换为普通 bool。
+
+    输入语义：value 可能是 Python bool、numpy bool、0/1、字符串或 NaN。
+    输出语义：返回普通 Python bool。
+    关键约束：字符串 ``"False"`` 不能直接用 ``bool("False")``，需要显式解析。
+    """
+
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes"}
+    if isinstance(value, float) and pd.isna(value):
+        return False
+    return bool(value)
+
+
+def estimate_player_strategy(row: pd.Series, player: str) -> str:
+    """根据单行 07 修正结果判断某个玩家当前显示策略。
+
+    输入语义：row 是视频当前帧对应的 07 corrected weight 行，player 是 ``p1`` 或 ``p2``。
+    输出语义：返回 ``STRATEGY_AGENTS`` 中的策略名，或 ``stay``/``vague``。
+    关键约束：显示逻辑沿用旧 gram 视频：stay 优先，其次 vague；普通段落取
+    revised normalized weight 最大的策略。两个 evade 策略显示时会合并成同一个 ``evade``。
+    为了方便临时预览 06 数据，若 07 revised 字段不存在，会回退到 06 原始字段。
+    """
+
+    stay_column = f"{player}_is_stay"
+    vague_column = f"{player}_revised_is_vague" if f"{player}_revised_is_vague" in row.index else f"{player}_is_vague"
+    weight_column = (
+        f"{player}_revised_normalized_weight"
+        if f"{player}_revised_normalized_weight" in row.index
+        else f"{player}_normalized_weight"
+    )
+
+    if stay_column in row.index and bool_from_row_value(row[stay_column]):
+        return "stay"
+    if vague_column in row.index and bool_from_row_value(row[vague_column]):
+        return "vague"
+    if weight_column not in row.index:
+        return "vague"
+
+    weights = parse_numeric_vector(row[weight_column])
+    if weights.size == 0 or np.sum(np.abs(weights)) == 0:
+        return "vague"
+
+    # 按当前可用长度截断，避免未来策略数量变化时因为旧视频脚本直接崩溃。
+    agents = STRATEGY_AGENTS[: weights.size]
+    max_value = np.max(weights)
+    max_indices = np.where(weights == max_value)[0]
+    if len(max_indices) > 1:
+        # 并列时优先给出旧脚本中更稳定可解释的 local/global；若只在两个 evade
+        # 之间并列，则仍显示合并后的 evade。其它复杂并列显示 vague。
+        if 1 in max_indices:
+            return "local"
+        if 0 in max_indices:
+            return "global"
+        tied_agents = {agents[index] for index in max_indices}
+        if tied_agents and tied_agents <= {"evade_blinky", "evade_clyde"}:
+            return agents[int(max_indices[0])]
+        return "vague"
+    return agents[int(max_indices[0])]
+
+
 def load_label_font(cell_size: int) -> ImageFont.ImageFont:
     """加载地图行列号和帧信息字体。
 
@@ -122,6 +248,26 @@ def load_label_font(cell_size: int) -> ImageFont.ImageFont:
     font_size = max(10, min(16, int(cell_size * 0.52)))
     for font_path in (
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ):
+        candidate = Path(font_path)
+        if candidate.is_file():
+            return ImageFont.truetype(str(candidate), font_size)
+    return ImageFont.load_default()
+
+
+def load_strategy_font(cell_size: int) -> ImageFont.ImageFont:
+    """加载策略条字体。
+
+    输入语义：cell_size 是当前绘制画布上的格子尺寸；超采样绘制时会传入放大后的尺寸。
+    输出语义：返回 PIL 字体对象。
+    关键约束：策略条最终要经过下采样，不能复用带最大字号上限的坐标标签字体，
+    否则文字会变得过小、难以阅读。
+    """
+
+    font_size = max(16, int(cell_size * 0.62))
+    for font_path in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ):
         candidate = Path(font_path)
@@ -156,6 +302,49 @@ def text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -
 
     left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
     return right - left, bottom - top
+
+
+def draw_strategy_bar(
+    draw: ImageDraw.ImageDraw,
+    row: pd.Series,
+    metadata: dict[str, int],
+    font: ImageFont.ImageFont,
+) -> None:
+    """在地图上方绘制两个玩家当前拟合策略。
+
+    输入语义：row 是当前 06 weight 行，metadata 是当前画布坐标元数据，font 是文本字体。
+    输出语义：在当前帧顶部绘制左右分离的 P1/P2 策略色块。
+    关键约束：旧 gram 图中一个人两个连续测量会挨着画；这里是两个玩家各一个
+    单测量，因此 P1 放左侧、P2 放右侧，中间留出明显空白，避免被误读为序列。
+    """
+
+    cell_size = metadata["cell_size"]
+    origin_x = metadata["origin_x"]
+    map_width = (metadata["x_max"] - metadata["x_min"] + 1) * cell_size
+    bar_width = max(int(map_width * 0.34), cell_size * 8)
+    bar_width = min(bar_width, int(map_width * 0.42))
+    bar_height = max(int(cell_size * 1.25), 32)
+    bar_y = max(int(cell_size * 1.0), 30)
+    bar_specs = (
+        ("p1", "P1", origin_x),
+        ("p2", "P2", origin_x + map_width - bar_width),
+    )
+
+    for player, player_label, bar_x in bar_specs:
+        strategy = estimate_player_strategy(row, player)
+        display_name = STRATEGY_DISPLAY_NAMES.get(strategy, strategy)
+        fill = STRATEGY_COLORS.get(strategy, STRATEGY_COLORS["vague"])
+        rectangle = [bar_x, bar_y, bar_x + bar_width, bar_y + bar_height]
+
+        draw.rectangle(rectangle, fill=fill, outline=(0, 0, 0), width=max(2, int(cell_size * 0.06)))
+        label = f"{player_label}  {display_name}"
+        text_width, text_height = text_size(draw, label, font)
+        draw.text(
+            (bar_x + (bar_width - text_width) / 2, bar_y + (bar_height - text_height) / 2),
+            label,
+            fill=(255, 255, 255),
+            font=font,
+        )
 
 
 def draw_centered_icon(
@@ -256,7 +445,9 @@ def build_base_map_image(
     label_margin = max(46, cell_size * 2)
     right_padding = max(12, cell_size // 2)
     bottom_padding = max(12, cell_size // 2)
-    header_height = max(28, int(cell_size * 1.2))
+    # 顶部空间同时容纳帧信息和左右分开的 P1/P2 策略条。这里不把策略条叠在
+    # 棋盘上，避免遮挡地图第 1 行。
+    header_height = max(78, int(cell_size * 3.1))
     image_width = label_margin + width_cells * cell_size + right_padding
     image_height = header_height + label_margin + height_cells * cell_size + bottom_padding
     # mp4 的 yuv420p 编码要求宽高为偶数；格子尺寸改变后必须显式对齐，
@@ -581,9 +772,9 @@ def render_tile_frame(
     total_tiles: int,
     aa: int = DEFAULT_AA,
 ) -> np.ndarray:
-    """把一条 04 corrected tile 行渲染为视频帧。
+    """把一条 06 weight 行渲染为视频帧。
 
-    输入语义：row 是某个 ``DayTrial`` 的一条 tile 记录。
+    输入语义：row 是某个 ``DayTrial`` 的一条 06 拟合结果记录，包含位置和策略字段。
     输出语义：返回 imageio 可写入的视频帧 numpy 数组。
     关键约束：本函数不改变底图；当 aa>1 时先在高分辨率副本上绘制，再缩回
     底图尺寸，以减少 Pacman、ghost 和豆子边缘锯齿。
@@ -595,11 +786,13 @@ def render_tile_frame(
         frame = base_image.resize((base_image.width * aa, base_image.height * aa), Image.Resampling.NEAREST)
         active_metadata = scale_render_metadata(metadata, aa)
         active_font = load_label_font(metadata["cell_size"] * aa)
+        active_strategy_font = load_strategy_font(metadata["cell_size"] * aa)
         header_y = 8 * aa
     else:
         frame = base_image.copy()
         active_metadata = metadata
         active_font = font
+        active_strategy_font = load_strategy_font(metadata["cell_size"])
         header_y = 8
     draw = ImageDraw.Draw(frame)
     header = (
@@ -607,6 +800,7 @@ def render_tile_frame(
         f"frame_id={int(row['frame_id'])}"
     )
     draw.text((active_metadata["origin_x"], header_y), header, fill=DISPLAY_LABEL_COLOR, font=active_font)
+    draw_strategy_bar(draw, row, active_metadata, active_strategy_font)
 
     item_color = (178, 45, 45)
     # 当前棋盘图的格子比旧游戏帧更稀疏，旧 renderer 的普通豆子半径会几乎不可见。
@@ -701,9 +895,9 @@ def render_tile_frame(
 
 
 def collect_tile_files(tile_root: Path, task: str) -> list[Path]:
-    """收集指定任务下可用于视频绘制的 04 tile 文件。
+    """收集指定任务下可用于视频绘制的 07 corrected weight 文件。
 
-    输入语义：tile_root 是 ``data/04_corrected_tile_data``，task 通常是 comp 或 coop。
+    输入语义：tile_root 是 ``data/07_corrected_weight_data``，task 通常是 comp 或 coop。
     输出语义：返回排序后的 pkl 路径列表。
     关键约束：脚本只处理当前嵌套目录结构，不兼容旧扁平目录。
     """
@@ -718,7 +912,7 @@ def collect_tile_files(tile_root: Path, task: str) -> list[Path]:
 
 
 def choose_tile_file(tile_root: Path, task: str, session: str | None) -> Path:
-    """选择要绘制的 04 corrected tile 文件。
+    """选择要绘制的 07 corrected weight 文件。
 
     输入语义：session 可以是文件名或不带后缀的 session stem；为空时使用任务下第一个文件。
     输出语义：返回一个存在的 pkl 路径。
@@ -737,19 +931,27 @@ def choose_tile_file(tile_root: Path, task: str, session: str | None) -> Path:
 
 
 def load_game_rows(tile_path: Path, trial: str | None, max_tiles: int | None) -> pd.DataFrame:
-    """读取一个 04 corrected tile 文件中的某个 game。
+    """读取一个 07 corrected weight 文件中的某个 game。
 
-    输入语义：tile_path 指向 04 corrected tile pkl；trial 是可选 DayTrial。
+    输入语义：tile_path 指向 07 revise_human_weight 输出 pkl；trial 是可选 DayTrial。
     输出语义：返回按原顺序排列的单个 game 行。
     关键约束：如果 trial 为空，默认选择文件中第一个 DayTrial，方便快速检查。
     """
 
     data = pd.read_pickle(tile_path)
     required_position_columns = ("p1_pos", "p1_alive", "ghost1Pos", "ghost2Pos")
-    required_columns = (*required_position_columns, *ITEM_COLUMNS)
+    required_strategy_columns = (
+        "p1_revised_normalized_weight",
+        "p1_is_stay",
+        "p1_revised_is_vague",
+        "p2_revised_normalized_weight",
+        "p2_is_stay",
+        "p2_revised_is_vague",
+    )
+    required_columns = (*required_position_columns, *ITEM_COLUMNS, *required_strategy_columns)
     missing = [column for column in required_columns if column not in data.columns]
     if missing:
-        raise TileVideoRenderError(f"{tile_path} 缺少位置字段：{missing}")
+        raise TileVideoRenderError(f"{tile_path} 缺少 06 视频绘制所需字段：{missing}")
     if "DayTrial" not in data.columns or "frame_id" not in data.columns:
         raise TileVideoRenderError(f"{tile_path} 缺少 DayTrial 或 frame_id 字段。")
 
@@ -851,7 +1053,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """命令行入口：读取 04 corrected tile 数据并生成一个简易 game 视频。"""
+    """命令行入口：读取 07 corrected weight 数据并生成一个简易 game 视频。"""
 
     args = parse_args()
     tile_path = choose_tile_file(args.tile_root, args.task, args.session)
@@ -889,6 +1091,7 @@ def main() -> None:
     print(f"aa：{args.aa}")
     print(f"地图范围：x={metadata['x_min']}..{metadata['x_max']}, y={metadata['y_min']}..{metadata['y_max']}")
     print("角色图形：旧 renderer 静态 sprite")
+    print("策略显示：07 修正权重，P1/P2 左右分离显示")
     print(f"输出视频：{output_path.resolve()}")
     if args.save_frames:
         print(f"输出图片帧：{frame_output_dir.resolve()}")

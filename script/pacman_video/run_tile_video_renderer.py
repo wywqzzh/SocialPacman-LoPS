@@ -68,6 +68,17 @@ STRATEGY_DISPLAY_NAMES = {
     "stay": "stay",
     "vague": "vague",
 }
+STRATEGY_NUMBER_TO_NAME = {
+    0: "global",
+    1: "local",
+    2: "evade_blinky",
+    3: "evade_clyde",
+    6: "approach",
+    7: "energizer",
+    8: "no_energizer",
+    9: "vague",
+    10: "stay",
+}
 STRATEGY_COLORS = {
     # 颜色沿用旧 GenerateSimpleVideo_fMRI_gram.py 中每个单测量策略块的配色；
     # 新增的 no_energizer 使用旧脚本预留的深蓝色。
@@ -190,15 +201,53 @@ def bool_from_row_value(value: Any) -> bool:
     return bool(value)
 
 
+def strategy_name_from_saved_value(value: Any) -> str | None:
+    """把 07 写回的策略字段转换成视频显示使用的策略名。
+
+    输入语义：value 通常来自 ``p1_strategy`` 或 ``p2_strategy``，可以是旧编号、
+    numpy 数值、字符串策略名或空值。
+    输出语义：返回 ``STRATEGY_DISPLAY_NAMES`` 支持的策略名；无法识别时返回 None，
+    让上层回退到按权重估计。
+    关键约束：07 已经在 context 层处理了 scared-majority approach 优先级，
+    视频端应优先使用该字段，避免渲染时用单行权重重复推断出不同标签。
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.lower() in {"", "nan", "none"}:
+            return None
+        if stripped in STRATEGY_DISPLAY_NAMES:
+            return stripped
+        try:
+            number = int(float(stripped))
+        except ValueError:
+            return None
+        return STRATEGY_NUMBER_TO_NAME.get(number)
+    try:
+        return STRATEGY_NUMBER_TO_NAME.get(int(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def estimate_player_strategy(row: pd.Series, player: str) -> str:
     """根据单行 07 修正结果判断某个玩家当前显示策略。
 
     输入语义：row 是视频当前帧对应的 07 corrected weight 行，player 是 ``p1`` 或 ``p2``。
     输出语义：返回 ``STRATEGY_AGENTS`` 中的策略名，或 ``stay``/``vague``。
-    关键约束：显示逻辑沿用旧 gram 视频：stay 优先，其次 vague；普通段落取
-    revised normalized weight 最大的策略。两个 evade 策略显示时会合并成同一个 ``evade``。
-    为了方便临时预览 06 数据，若 07 revised 字段不存在，会回退到 06 原始字段。
+    关键约束：若 07 已写入 ``p1_strategy/p2_strategy``，优先使用该字段；它包含了
+    context 级 scared-majority approach 并列优先级。为了方便临时预览 06 数据，
+    若 07 strategy 字段不存在，再回退到 revised/original weight 的单行估计。
     """
+
+    strategy_column = f"{player}_strategy"
+    if strategy_column in row.index:
+        saved_strategy = strategy_name_from_saved_value(row[strategy_column])
+        if saved_strategy is not None:
+            return saved_strategy
 
     stay_column = f"{player}_is_stay"
     vague_column = f"{player}_revised_is_vague" if f"{player}_revised_is_vague" in row.index else f"{player}_is_vague"
@@ -224,8 +273,9 @@ def estimate_player_strategy(row: pd.Series, player: str) -> str:
     max_value = np.max(weights)
     max_indices = np.where(weights == max_value)[0]
     if len(max_indices) > 1:
-        # 并列时优先给出旧脚本中更稳定可解释的 local/global；若只在两个 evade
-        # 之间并列，则仍显示合并后的 evade。其它复杂并列显示 vague。
+        # 没有 07 strategy 字段时才走这套兜底规则：并列时优先给出旧脚本中
+        # 更稳定可解释的 local/global；若只在两个 evade 之间并列，则仍显示
+        # 合并后的 evade。其它复杂并列显示 vague。
         if 1 in max_indices:
             return "local"
         if 0 in max_indices:
@@ -276,6 +326,26 @@ def load_strategy_font(cell_size: int) -> ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
+def load_header_font(cell_size: int) -> ImageFont.ImageFont:
+    """加载顶部帧信息和 context 信息字体。
+
+    输入语义：cell_size 是当前绘制画布上的格子尺寸；超采样绘制时会传入放大后的尺寸。
+    输出语义：返回比坐标标签更大的字体对象。
+    关键约束：顶部文字用于快速检查当前视频帧、原始帧号和 context，字号必须明显
+    大于行列号，但不能大到压住策略条或地图。
+    """
+
+    font_size = max(18, int(cell_size * 0.72))
+    for font_path in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ):
+        candidate = Path(font_path)
+        if candidate.is_file():
+            return ImageFont.truetype(str(candidate), font_size)
+    return ImageFont.load_default()
+
+
 def load_icon_fonts(icon_font_path: Path, cell_size: int) -> dict[str, ImageFont.ImageFont] | None:
     """加载 Font Awesome 图标字体。
 
@@ -304,6 +374,81 @@ def text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -
     return right - left, bottom - top
 
 
+def parse_context_range(value: Any) -> tuple[int, int] | None:
+    """解析单个玩家的 trial context 区间。
+
+    输入语义：value 通常来自 ``p1_trial_context`` 或 ``p2_trial_context``，可以是
+    tuple/list，也可能是字符串形式的 ``(start, end)``。
+    输出语义：返回 ``(start_row_id, end_row_id)``，其中 end 是右开边界；缺失值返回 None。
+    关键约束：context 在 06 阶段使用 row_id 表达，视频显示前必须转成 frame_id，
+    否则容易把数据行号误读成原始游戏帧号。
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    parsed = ast.literal_eval(value) if isinstance(value, str) else value
+    if not isinstance(parsed, (tuple, list)) or len(parsed) != 2:
+        return None
+    return int(parsed[0]), int(parsed[1])
+
+
+def build_context_video_frame_lookup(game_rows: pd.DataFrame) -> dict[int, int]:
+    """构造 row_id 到当前视频帧序号的查表。
+
+    输入语义：game_rows 是同一个 DayTrial 的连续 tile 行，必须保留 04/05/06 阶段
+    写入的 ``row_id``；当前视频帧序号按绘制顺序从 1 开始。
+    输出语义：返回 ``{row_id: video_frame_index}``。
+    关键约束：视频顶部的 ``video frame`` 也是 1-based，因此 context 也使用
+    同一套编号，避免把原始 frame_id 和视频帧序号混在一起。
+    """
+
+    if "row_id" not in game_rows.columns:
+        return {}
+    return {
+        int(row["row_id"]): int(index) + 1
+        for index, row in game_rows.iterrows()
+        if not pd.isna(row["row_id"])
+    }
+
+
+def format_player_context_video_frames(
+    row: pd.Series,
+    player: str,
+    context_video_frame_lookup: dict[int, int],
+) -> str:
+    """把某个玩家当前 context 格式化为当前视频帧闭区间。
+
+    输入语义：row 是当前视频帧对应的 tile 行，player 是 ``p1`` 或 ``p2``，
+    context_video_frame_lookup 用于把 context row_id 转成当前视频帧序号。
+    输出语义：返回类似 ``P1 ctx [38,43]`` 的短文本，左右端都是当前视频中的
+    1-based 帧号，且是闭区间。
+    关键约束：06 阶段的 context 本身是 row_id 右开区间 ``[start, end)``；
+    视频显示时需要转换为闭区间 ``[start_video_frame, last_video_frame]``，
+    即右端显示为 context 内最后一条实际渲染行，而不是右开边界对应的下一行。
+    """
+
+    label = player.upper()
+    context_column = f"{player}_trial_context"
+    if context_column not in row.index:
+        return f"{label} ctx n/a"
+
+    context_range = parse_context_range(row[context_column])
+    if context_range is None:
+        return f"{label} ctx n/a"
+
+    start_row_id, end_row_id = context_range
+    included_video_frames = [
+        video_frame
+        for row_id, video_frame in context_video_frame_lookup.items()
+        if start_row_id <= row_id < end_row_id
+    ]
+    if not included_video_frames:
+        return f"{label} ctx rows [{start_row_id},{end_row_id})"
+    return f"{label} ctx [{min(included_video_frames)},{max(included_video_frames)}]"
+
+
 def draw_strategy_bar(
     draw: ImageDraw.ImageDraw,
     row: pd.Series,
@@ -324,7 +469,8 @@ def draw_strategy_bar(
     bar_width = max(int(map_width * 0.34), cell_size * 8)
     bar_width = min(bar_width, int(map_width * 0.42))
     bar_height = max(int(cell_size * 1.25), 32)
-    bar_y = max(int(cell_size * 1.0), 30)
+    # 顶部现在有两行较大的帧/context 文本，策略条需要下移，避免文字和色块互相遮挡。
+    bar_y = max(int(cell_size * 2.55), 72)
     bar_specs = (
         ("p1", "P1", origin_x),
         ("p2", "P2", origin_x + map_width - bar_width),
@@ -447,7 +593,7 @@ def build_base_map_image(
     bottom_padding = max(12, cell_size // 2)
     # 顶部空间同时容纳帧信息和左右分开的 P1/P2 策略条。这里不把策略条叠在
     # 棋盘上，避免遮挡地图第 1 行。
-    header_height = max(78, int(cell_size * 3.1))
+    header_height = max(128, int(cell_size * 4.8))
     image_width = label_margin + width_cells * cell_size + right_padding
     image_height = header_height + label_margin + height_cells * cell_size + bottom_padding
     # mp4 的 yuv420p 编码要求宽高为偶数；格子尺寸改变后必须显式对齐，
@@ -770,6 +916,7 @@ def render_tile_frame(
     *,
     tile_index: int,
     total_tiles: int,
+    context_video_frame_lookup: dict[int, int],
     aa: int = DEFAULT_AA,
 ) -> np.ndarray:
     """把一条 06 weight 行渲染为视频帧。
@@ -777,7 +924,8 @@ def render_tile_frame(
     输入语义：row 是某个 ``DayTrial`` 的一条 06 拟合结果记录，包含位置和策略字段。
     输出语义：返回 imageio 可写入的视频帧 numpy 数组。
     关键约束：本函数不改变底图；当 aa>1 时先在高分辨率副本上绘制，再缩回
-    底图尺寸，以减少 Pacman、ghost 和豆子边缘锯齿。
+    底图尺寸，以减少 Pacman、ghost 和豆子边缘锯齿。context_video_frame_lookup
+    用于把 06 的 row_id context 显示成当前视频帧闭区间。
     """
 
     if aa <= 0:
@@ -785,21 +933,35 @@ def render_tile_frame(
     if aa > 1:
         frame = base_image.resize((base_image.width * aa, base_image.height * aa), Image.Resampling.NEAREST)
         active_metadata = scale_render_metadata(metadata, aa)
-        active_font = load_label_font(metadata["cell_size"] * aa)
+        active_font = load_header_font(metadata["cell_size"] * aa)
         active_strategy_font = load_strategy_font(metadata["cell_size"] * aa)
-        header_y = 8 * aa
+        header_y = 10 * aa
+        header_line_gap = max(24 * aa, int(active_metadata["cell_size"] * 0.82))
     else:
         frame = base_image.copy()
         active_metadata = metadata
-        active_font = font
+        active_font = load_header_font(metadata["cell_size"])
         active_strategy_font = load_strategy_font(metadata["cell_size"])
-        header_y = 8
+        header_y = 10
+        header_line_gap = max(24, int(active_metadata["cell_size"] * 0.82))
     draw = ImageDraw.Draw(frame)
-    header = (
-        f"{row['DayTrial']}  tile {tile_index + 1}/{total_tiles}  "
-        f"frame_id={int(row['frame_id'])}"
+    header_line_1 = (
+        f"video frame {tile_index + 1}/{total_tiles}  "
+        f"raw frame_id {int(row['frame_id'])}  {row['DayTrial']}"
     )
-    draw.text((active_metadata["origin_x"], header_y), header, fill=DISPLAY_LABEL_COLOR, font=active_font)
+    header_line_2 = "  |  ".join(
+        [
+            format_player_context_video_frames(row, "p1", context_video_frame_lookup),
+            format_player_context_video_frames(row, "p2", context_video_frame_lookup),
+        ]
+    )
+    draw.text((active_metadata["origin_x"], header_y), header_line_1, fill=DISPLAY_LABEL_COLOR, font=active_font)
+    draw.text(
+        (active_metadata["origin_x"], header_y + header_line_gap),
+        header_line_2,
+        fill=DISPLAY_LABEL_COLOR,
+        font=active_font,
+    )
     draw_strategy_bar(draw, row, active_metadata, active_strategy_font)
 
     item_color = (178, 45, 45)
@@ -1058,6 +1220,7 @@ def main() -> None:
     args = parse_args()
     tile_path = choose_tile_file(args.tile_root, args.task, args.session)
     game_rows = load_game_rows(tile_path, args.trial, args.max_tiles)
+    context_video_frame_lookup = build_context_video_frame_lookup(game_rows)
     walkable_positions = load_walkable_positions(args.map_constants)
     base_image, metadata, font = build_base_map_image(walkable_positions, cell_size=args.cell_size)
     icon_fonts = None
@@ -1071,6 +1234,7 @@ def main() -> None:
             row,
             tile_index=index,
             total_tiles=len(game_rows),
+            context_video_frame_lookup=context_video_frame_lookup,
             aa=args.aa,
         )
         for index, row in game_rows.iterrows()
@@ -1091,7 +1255,7 @@ def main() -> None:
     print(f"aa：{args.aa}")
     print(f"地图范围：x={metadata['x_min']}..{metadata['x_max']}, y={metadata['y_min']}..{metadata['y_max']}")
     print("角色图形：旧 renderer 静态 sprite")
-    print("策略显示：07 修正权重，P1/P2 左右分离显示")
+    print("策略显示：优先使用 07 strategy 字段，P1/P2 左右分离显示")
     print(f"输出视频：{output_path.resolve()}")
     if args.save_frames:
         print(f"输出图片帧：{frame_output_dir.resolve()}")

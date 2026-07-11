@@ -61,6 +61,9 @@ class DynamicStrategyFittingConfig:
     random_seed: int | None = None
     segment_workers: int = 1
     use_segment_seed: bool = False
+    local_bean_distance_threshold: int = 10
+    min_effective_action_count: int = 4
+    min_effective_action_ratio: float = 0.5
 
 
 def choose_max_direction(probability: Any) -> int:
@@ -689,6 +692,23 @@ def fit_one_segment(
         return None
 
     valid_indices = np.where((temp_data.nan_dir == False) & (temp_data.available_dir == True))[0] + start
+    effective_action_ratio = valid_data.shape[0] / max(end - start, 1)
+    if (
+        valid_data.shape[0] < config.min_effective_action_count
+        or effective_action_ratio < config.min_effective_action_ratio
+    ):
+        # 有效动作太少或占比太低时，段落通常是短暂停顿、回摆或长 stay 边缘。
+        # 这类段落即使某个策略偶然完全命中少数动作，也不应被解释成确定策略；
+        # 因此直接标为 vague，并保留 0 权重，避免 GA 对低证据段过拟合。
+        return {
+            "resultlist": [0] * len(config.agents) + [0] + [start] + [end],
+            "ind": None,
+            "phase_is_correct": None,
+            "predict_dir": None,
+            "is_vague": True,
+            "loss": None,
+        }
+
     true_prob = valid_data.action_dir.ffill().apply(one_hot_direction)
     true_direction = true_prob.apply(choose_max_direction).values
     sample_count = valid_data.shape[0]
@@ -1084,6 +1104,9 @@ def process_dynamic_strategy_file(
             random_seed=config.random_seed + file_index,
             segment_workers=config.segment_workers,
             use_segment_seed=config.use_segment_seed,
+            local_bean_distance_threshold=config.local_bean_distance_threshold,
+            min_effective_action_count=config.min_effective_action_count,
+            min_effective_action_ratio=config.min_effective_action_ratio,
         )
     else:
         file_config = config

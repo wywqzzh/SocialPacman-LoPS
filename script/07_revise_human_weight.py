@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import os
 from copy import deepcopy
@@ -54,6 +55,11 @@ PLAYER_REVISED_COLUMNS = (
     "revised_is_vague",
     "strategy",
 )
+VAGUE_REVISE_MIN_ACCURACY = 0.70
+VAGUE_REVISE_MIN_VALID_ACTIONS = 4
+LOW_EVIDENCE_MIN_EFFECTIVE_ACTION_COUNT = 4
+LOW_EVIDENCE_MIN_EFFECTIVE_ACTION_RATIO = 0.5
+SCARED_GHOST_STATUS_MIN = 4
 
 
 @dataclass
@@ -130,6 +136,114 @@ def choose_max_direction(probability: Any) -> int:
     return next(index for index, value in enumerate(values) if value == max_value)
 
 
+def normalize_context_key(value: Any) -> tuple[int, int] | None:
+    """把 trial_context 字段整理成可作为字典键的半开区间。
+
+    输入语义：value 通常是 ``(start, end)``，也可能来自字符串化的元组或 numpy 数组。
+    输出语义：返回整数 ``(start, end)``；无法解析时返回 None。
+    关键约束：07 的优先级调整需要在整个 context 上统计 ghost scared 比例，
+    因此必须把同一段落的所有行稳定归入同一个 key。
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.lower() in {"", "nan", "none"}:
+            return None
+        try:
+            value = ast.literal_eval(stripped)
+        except (SyntaxError, ValueError):
+            return None
+    if isinstance(value, np.ndarray):
+        value = value.reshape(-1).tolist()
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        return None
+    try:
+        return int(value[0]), int(value[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def build_approach_priority_mask(data: pd.DataFrame) -> pd.Series:
+    """标记哪些 context 在并列权重时应让 approach 优先。
+
+    输入语义：data 是单个 trial 的单人临时视角，包含 ``trial_context`` 和
+    ``ifscared1/ifscared2``。
+    输出语义：返回与 data 同索引的 bool Series，True 表示该行所在 context 中超过一半
+    tile 行至少有一只 ghost 处于 scared 状态。
+    关键约束：该函数只提供“并列时 approach 可优先”的上下文条件，不直接改变权重；
+    若 approach 本身不是最大权重之一，后续策略选择仍保持原规则。
+    """
+
+    priority_mask = pd.Series(False, index=data.index, dtype=bool)
+    required_columns = {"trial_context", "ifscared1", "ifscared2"}
+    if not required_columns <= set(data.columns):
+        return priority_mask
+
+    context_keys = data["trial_context"].apply(normalize_context_key)
+    scared_rows = (
+        pd.to_numeric(data["ifscared1"], errors="coerce").ge(SCARED_GHOST_STATUS_MIN)
+        | pd.to_numeric(data["ifscared2"], errors="coerce").ge(SCARED_GHOST_STATUS_MIN)
+    )
+
+    # pandas 对 tuple 分组有时会把它解释成多层键；这里显式构造字典，保证
+    # ``(start, end)`` 作为一个整体 context key 使用。
+    context_to_labels: dict[tuple[int, int], list[Any]] = {}
+    for label, context_key in context_keys.items():
+        if context_key is None:
+            continue
+        context_to_labels.setdefault(context_key, []).append(label)
+
+    for labels in context_to_labels.values():
+        scared_ratio = float(scared_rows.loc[labels].mean())
+        if scared_ratio > 0.5:
+            priority_mask.loc[labels] = True
+    return priority_mask
+
+
+def weight_has_tied_approach_max(weight: Any) -> bool:
+    """判断权重中 approach 是否与其它策略并列最大。
+
+    输入语义：weight 是 7 个 agent 的权重向量，通常来自
+    ``revised_normalized_weight``。
+    输出语义：当 approach 位于最大权重集合，且最大集合至少包含两个策略时返回 True。
+    关键约束：该函数用于保护“scared 多数 + approach 并列最大”的段落不被
+    revise_approach 再改写为其它策略；如果 approach 不是最大并列项，则仍按原规则修正。
+    """
+
+    try:
+        weight_array = np.asarray(weight, dtype=float).reshape(-1)
+    except (TypeError, ValueError):
+        return False
+    if weight_array.size <= AGENT_INDEX["approach"] or weight_array.size == 0:
+        return False
+    if np.sum(np.abs(weight_array)) == 0:
+        return False
+    max_value = np.max(weight_array)
+    max_indices = np.where(weight_array == max_value)[0]
+    return len(max_indices) > 1 and AGENT_INDEX["approach"] in max_indices
+
+
+def context_has_scared_majority(segment: pd.DataFrame) -> bool:
+    """判断一个 context 内是否超过一半行存在 scared ghost。
+
+    输入语义：segment 是 ``data.loc[prev:end-1]`` 得到的同一 context 片段。
+    输出语义：当至少一只 ghost 的状态码大于等于 4 的行比例超过 0.5 时返回 True。
+    关键约束：ifscared=3 表示 dead，不算 scared；ifscared>=4 才表示 scared/flash scared。
+    """
+
+    if segment.empty or not {"ifscared1", "ifscared2"} <= set(segment.columns):
+        return False
+    scared_rows = (
+        pd.to_numeric(segment["ifscared1"], errors="coerce").ge(SCARED_GHOST_STATUS_MIN)
+        | pd.to_numeric(segment["ifscared2"], errors="coerce").ge(SCARED_GHOST_STATUS_MIN)
+    )
+    return float(scared_rows.mean()) > 0.5
+
+
 def strategy_from_weight(
     weight: Any,
     is_stay: bool,
@@ -137,12 +251,15 @@ def strategy_from_weight(
     strategy_to_number: dict[str, int],
     file_name: str,
     trial_name: str,
+    prefer_approach_when_scared: bool = False,
 ) -> int:
     """根据权重向量和人工标记得到策略编号。
 
     输入语义：weight 是 7 个 agent 权重，is_stay/is_vague 是旧流程标记。
     输出语义：返回旧策略编号。
     关键约束：权重向量下标与旧策略编号不同，必须通过 AGENT_INDEX 显式映射。
+    当当前 context 中 scared ghost 占多数且 approach 与其它策略并列最大时，
+    approach 优先；否则保持原有并列优先级。
     """
 
     if is_stay is True:
@@ -158,6 +275,8 @@ def strategy_from_weight(
         max_value = np.max(weight)
         max_indices = np.where(weight == max_value)[0]
         if len(max_indices) > 1:
+            if prefer_approach_when_scared and AGENT_INDEX["approach"] in max_indices:
+                return strategy_to_number["approach"]
             if AGENT_INDEX["local"] in max_indices:
                 return strategy_to_number["local"]
             if AGENT_INDEX["global"] in max_indices:
@@ -184,9 +303,12 @@ def recompute_strategy(data: pd.DataFrame, file_name: str, trial_name: str) -> N
 
     输入语义：data 是单个 trial 的工作表，file_name/trial_name 用于错误定位。
     输出语义：就地更新 data 的 `strategy` 列。
-    关键约束：每个规则阶段后都按旧脚本重新计算 strategy。
+    关键约束：每个规则阶段后都重新计算 strategy。并列权重的基础规则沿用旧脚本；
+    只有当一个 context 中 scared ghost 行数超过一半，且 approach 同为最大权重时，
+    才把 approach 作为该 context 的优先显示策略。
     """
 
+    approach_priority_mask = build_approach_priority_mask(data)
     data["strategy"] = data[["revised_normalized_weight", "is_stay", "is_vague"]].apply(
         lambda row: strategy_from_weight(
             row.revised_normalized_weight,
@@ -195,6 +317,7 @@ def recompute_strategy(data: pd.DataFrame, file_name: str, trial_name: str) -> N
             STRATEGY_NUMBER,
             file_name,
             trial_name,
+            bool(approach_priority_mask.loc[row.name]),
         ),
         axis=1,
     )
@@ -216,8 +339,8 @@ def discover_players(data: pd.DataFrame) -> list[str]:
             "row_id",
             "ifscared1",
             "ifscared2",
-            "eat_energizer",
-            "eat_ghost",
+            f"{player}_eat_energizer",
+            f"{player}_eat_ghost",
             f"{player}_action_dir",
             f"{player}_normalized_weight",
             f"{player}_prediction_correct",
@@ -245,7 +368,8 @@ def prepare_player_view(data: pd.DataFrame, player: str) -> pd.DataFrame:
     输入语义：data 是 06 输出表，player 指定 ``p1`` 或 ``p2``。
     输出语义：返回包含 ``normalized_weight/action_dir/trial_context`` 等通用字段的副本。
     关键约束：这里不删除任何 joint 行；死亡或无动作行已经由 06 表中的 action_dir/权重
-    表达，07 只沿用这些字段做规则修正。
+    表达。吃 energizer/ghost 事件也从玩家私有列映射过来，队友事件不再触发当前玩家
+    的 07 修正规则。
     """
 
     view = data.copy(deep=True)
@@ -257,6 +381,8 @@ def prepare_player_view(data: pd.DataFrame, player: str) -> pd.DataFrame:
         f"{player}_trial_context": "trial_context",
         f"{player}_is_stay": "is_stay",
         f"{player}_is_vague": "is_vague",
+        f"{player}_eat_energizer": "eat_energizer",
+        f"{player}_eat_ghost": "eat_ghost",
     }
     for source, target in column_mapping.items():
         view[target] = copy.deepcopy(view[source])
@@ -495,57 +621,81 @@ def revise_function(
         agent_accuracy, _ = score_agent_accuracies(context, list(range(len(AGENTS))))
         main_agent_accuracy = agent_accuracy[main_agent]
         max_accuracy = np.max(agent_accuracy)
+        # score_agent_accuracies 已经把全 0 无信息 Q 记为 0 分。若所有策略都是 0 分，
+        # 说明当前段落没有任何策略提供有效方向证据，不能仅凭事件标签强行改写。
         if max_accuracy <= 0:
             continue
         if main_agent_accuracy / max_accuracy > 0.8 and main_agent_accuracy > 0.6:
             apply_revised_weight(data, prev, end, context, revise_weight, update_predict_dir=True)
 
 
+def tied_best_accuracy_weight(agent_accuracy: list[float] | np.ndarray, *, tolerance: float = 1e-12) -> tuple[list[int], float]:
+    """把最高准确率并列策略转换成多热权重。
+
+    输入语义：agent_accuracy 是七个策略在同一 context 上的单策略预测准确率，
+    tolerance 用于抵抗浮点误差。
+    输出语义：返回 ``(revise_weight, max_accuracy)``，其中所有达到最高准确率的策略
+    权重都为 1，其它为 0。
+    关键约束：这里不做策略优先级选择；并列证据必须保留到权重里，最终显示策略统一交给
+    ``strategy_from_weight`` 的优先级规则决定，避免 revise 阶段用 ``argmax`` 提前丢失并列信息。
+    """
+
+    accuracy_array = np.asarray(agent_accuracy, dtype=float)
+    if accuracy_array.size == 0:
+        return [0] * len(AGENTS), 0.0
+    max_accuracy = float(np.max(accuracy_array))
+    revise_weight = [
+        1 if max_accuracy - float(value) <= tolerance else 0
+        for value in accuracy_array
+    ]
+    return revise_weight, max_accuracy
+
+
 def revise_vague(data: pd.DataFrame, contexts: list[tuple[int, int]]) -> None:
     """修正旧流程中标记为 vague 的段落。
 
     输入语义：contexts 来自 `is_vague=True` 的 trial_context。
-    输出语义：能明确归属单一策略的 vague 段会被改写权重和 is_vague。
-    关键约束：只有最大权重并列时才进入准确率比较；单一最大值直接取消 vague。
+    输出语义：只有至少一个单独策略能稳定预测真实方向时，才把 vague 段改写成这些策略。
+    关键约束：本函数不再相信拟合权重中的唯一最大值。对于 vague 段，必须逐一计算
+    七个单独策略的方向预测准确率；最优策略达到保守准确率阈值，且段落内有效动作
+    数量足够时，才取消 vague。若多个策略并列最高，修正权重会同时保留这些策略，
+    后续由统一优先级决定显示标签；否则保留 vague，避免把弱解释段或无信息段硬解释成
+    单一确定策略。
     """
 
     for prev, end in contexts:
         segment = copy.deepcopy(data.loc[prev : end - 1])
         if segment.empty:
             continue
-        weight = segment["revised_normalized_weight"].iloc[0]
-        if np.sum(weight) <= 0:
-            continue
-
-        if np.max(weight) < 1:
-            # revised_normalized_weight 来自旧内部 9 维 normalized_weight 的投影；若投影后最大值小于 1，
-            # 说明旧 3/4 鬼占位 agent 曾是唯一最大值。旧流程在 two-ghost 数据中会
-            # 跳过这类 vague 段，不把它改写成可见策略，因此这里保留 vague 状态。
-            continue
-
-        max_indices = np.where(weight == np.max(weight))[0]
-        if len(max_indices) == 1:
-            labels = list(data.loc[prev : end - 1].index)
-            data.loc[labels, "is_vague"] = [False] * len(labels)
-            continue
 
         context = extract_context_data(data, prev, end)
         if context is None:
             continue
-        agent_accuracy, agent_q_value = score_agent_accuracies(context, list(max_indices))
 
-        max_accuracy_index = -1
-        max_accuracy = -1.0
-        for local_index, agent_index in enumerate(max_indices):
-            if agent_accuracy[local_index] >= max_accuracy:
-                max_accuracy_index = int(agent_index)
-                max_accuracy = agent_accuracy[local_index]
+        effective_action_ratio = context.valid_data.shape[0] / max(end - prev, 1)
+        if (
+            context.valid_data.shape[0] < LOW_EVIDENCE_MIN_EFFECTIVE_ACTION_COUNT
+            or effective_action_ratio < LOW_EVIDENCE_MIN_EFFECTIVE_ACTION_RATIO
+        ):
+            # 这些 vague 来自“有效动作证据不足”的段落，例如长停顿边缘或短回摆。
+            # 即使某个策略碰巧完全命中少数有效动作，也不能把它修回确定策略。
+            continue
 
-        revise_weight = [0] * len(AGENTS)
-        revise_weight[max_accuracy_index] = 1
-        available_direction_count = 4 - np.sum(np.isinf(agent_q_value[0, :, 0]))
-        if max_accuracy > 1 / available_direction_count:
-            apply_revised_weight(data, prev, end, context, revise_weight, update_predict_dir=True)
+        # 过短段落容易因为一两个动作偶然命中而被误认为确定策略。这里要求至少
+        # 有 4 个有效动作，宁可保留 vague，也不制造伪确定性的策略标签。
+        if context.valid_data.shape[0] < VAGUE_REVISE_MIN_VALID_ACTIONS:
+            continue
+
+        agent_accuracy, _ = score_agent_accuracies(context, list(range(len(AGENTS))))
+        revise_weight, max_accuracy = tied_best_accuracy_weight(agent_accuracy)
+
+        # vague 段只有在最优单策略本身达到保守准确率阈值时才改写。
+        # 这里不再要求它明显领先第二名；如果多个策略都能同样解释该段，就把
+        # 这些并列最高策略都写入权重，交给统一策略优先级做最终显示。
+        if max_accuracy < VAGUE_REVISE_MIN_ACCURACY:
+            continue
+
+        apply_revised_weight(data, prev, end, context, revise_weight, update_predict_dir=True)
 
 
 def revise_approach(data: pd.DataFrame, contexts: list[tuple[int, int]]) -> None:
@@ -553,7 +703,9 @@ def revise_approach(data: pd.DataFrame, contexts: list[tuple[int, int]]) -> None
 
     输入语义：contexts 是当前被判定为 approach 且排除吃 ghost 后的段落。
     输出语义：如果其它策略预测表现接近或优于 approach，则改写为其它策略。
-    关键约束：保留旧规则 `accuracyApproach == 0 或 max/approach > 0.8`。
+    关键约束：基础规则保留旧逻辑 `accuracyApproach == 0 或 max/approach > 0.8`。
+    这些 contexts 已经排除了真正吃到 ghost 的段落，因此一旦触发修正，approach
+    不再作为候选策略；多个非 approach 策略并列最高时会同时保留为 1。
     """
 
     for prev, end in contexts:
@@ -562,14 +714,17 @@ def revise_approach(data: pd.DataFrame, contexts: list[tuple[int, int]]) -> None
             continue
         agent_accuracy, _ = score_agent_accuracies(context, list(range(len(AGENTS))))
         accuracy_approach = agent_accuracy[AGENT_INDEX["approach"]]
-        agent_accuracy[AGENT_INDEX["approach"]] = 0
-        max_index = int(np.argmax(agent_accuracy))
+        non_approach_accuracy = list(agent_accuracy)
+        non_approach_accuracy[AGENT_INDEX["approach"]] = 0
+        revise_weight, max_non_approach_accuracy = tied_best_accuracy_weight(non_approach_accuracy)
         # 若其它策略也完全没有有效预测能力，就不能仅因为 approach 为 0 而强行改写。
-        if agent_accuracy[max_index] <= 0:
+        if max_non_approach_accuracy <= 0:
             continue
-        if accuracy_approach == 0 or agent_accuracy[max_index] / accuracy_approach > 0.8:
-            revise_weight = [0] * len(AGENTS)
-            revise_weight[max_index] = 1
+        if accuracy_approach == 0 or max_non_approach_accuracy / accuracy_approach > 0.8:
+            # 修正触发条件仍然沿用旧逻辑：其它策略接近或优于 approach 时才修正。
+            # 由于这些 contexts 已经排除了真正吃到 ghost 的段落，所以修正候选里
+            # approach 必须保持为 0；若多个非 approach 策略并列最高，则同时保留它们，
+            # 再交给统一优先级决定最终显示标签。
             apply_revised_weight(data, prev, end, context, revise_weight, update_predict_dir=True)
 
 
@@ -622,6 +777,7 @@ def revise_wrong_energizer(data: pd.DataFrame, energizer_contexts: list[tuple[in
             # 当前双人数据中可能出现原权重在该段完全预测不到真实方向的情况。
             # 此时不能直接做 rate/original_rate。并且 local 若只是和原策略一样差，
             # 或只依赖无信息 Q 得到伪准确率，就不应覆盖原 energizer 判断。
+            # 这里要求 local 修正必须提供正的、且高于原策略的有效准确率；否则保留原权重。
             if (
                 rate <= 0
                 or (original_rate == 0 and rate == 0)

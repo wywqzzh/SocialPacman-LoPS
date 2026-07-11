@@ -19,6 +19,7 @@ from LoPS.calculate_utility import (  # noqa: E402
     CalculateUtilityConfig,
     load_calculate_utility_maps,
     process_calculate_utility_directory,
+    process_calculate_utility_file,
 )
 from LoPS.hierarchical_utility import UtilityConfig  # noqa: E402
 
@@ -42,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=data_root / "05_utility_data",
+        default=data_root / "05_cluster_global_utility_data",
         help="集中 utility 输出目录。",
     )
     parser.add_argument(
@@ -56,11 +57,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--laziness-coeff", type=float, default=0.0, help="沿用上一方向的惰性系数。")
     parser.add_argument("--global-depth", type=int, default=15, help="Global 策略深度参数。")
     parser.add_argument("--global-ignore-depth", type=int, default=10, help="Global 远距离 bean 过滤深度。")
+    parser.add_argument("--global-cluster-radius", type=int, default=60, help="Cluster Global 可考虑的最远资源团距离。")
+    parser.add_argument("--global-cluster-distance-threshold", type=int, default=3, help="Cluster Global 中资源点聚类的地图距离阈值。")
     parser.add_argument("--local-depth", type=int, default=10, help="Local 路径树深度。")
     parser.add_argument("--evade-depth", type=int, default=10, help="Evade 路径树深度。")
     parser.add_argument("--approach-depth", type=int, default=10, help="Approach 路径树深度。")
     parser.add_argument("--energizer-depth", type=int, default=10, help="Energizer 路径树深度。")
     parser.add_argument("--no-energizer-depth", type=int, default=8, help="NoEnergizer 路径树深度。")
+    parser.add_argument(
+        "--single-file",
+        type=Path,
+        default=None,
+        help="可选：只处理某个 corrected tile pkl。相对路径会基于 --input-dir 解析。",
+    )
     return parser.parse_args()
 
 
@@ -83,7 +92,28 @@ def build_config(args: argparse.Namespace) -> CalculateUtilityConfig:
         energizer_depth=args.energizer_depth,
         no_energizer_depth=args.no_energizer_depth,
     )
-    return CalculateUtilityConfig(utility_config=utility_config)
+    return CalculateUtilityConfig(
+        utility_config=utility_config,
+        global_cluster_radius=args.global_cluster_radius,
+        global_cluster_distance_threshold=args.global_cluster_distance_threshold,
+    )
+
+
+def resolve_single_file(input_dir: Path, value: Path) -> Path:
+    """解析单文件输入路径。
+
+    输入语义：value 可以是绝对路径、相对当前工作目录路径，或相对 input_dir 的路径。
+    输出语义：返回存在的输入 pickle 路径。
+    关键约束：不做模糊匹配；找不到时直接报错，避免把同名文件误跑到错误目录。
+    """
+
+    candidates = [value]
+    if not value.is_absolute():
+        candidates.append(input_dir / value)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(f"找不到 single-file：{value}")
 
 
 def main() -> None:
@@ -91,12 +121,26 @@ def main() -> None:
 
     args = parse_args()
     map_data, adjacent_map = load_calculate_utility_maps(args.constant_dir)
+    config = build_config(args)
+    if args.single_file is not None:
+        input_file = resolve_single_file(args.input_dir, args.single_file)
+        output_file = args.output_dir / input_file.relative_to(args.input_dir)
+        summary = process_calculate_utility_file(
+            input_file,
+            output_file,
+            map_data=map_data,
+            adjacent_map=adjacent_map,
+            config=config,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+
     summaries = process_calculate_utility_directory(
         input_dir=args.input_dir,
         output_dir=args.output_dir,
         map_data=map_data,
         adjacent_map=adjacent_map,
-        config=build_config(args),
+        config=config,
         workers=args.workers,
     )
     print(
@@ -109,6 +153,8 @@ def main() -> None:
                 "players": summarize_players(summaries),
                 "output_dir": str(args.output_dir),
                 "workers": args.workers,
+                "global_cluster_radius": args.global_cluster_radius,
+                "global_cluster_distance_threshold": args.global_cluster_distance_threshold,
             },
             ensure_ascii=False,
             indent=2,

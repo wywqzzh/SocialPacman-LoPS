@@ -60,6 +60,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ga-precision", type=float, default=1e-3, help="GA 权重精度。")
     parser.add_argument("--weight-penalty", type=float, default=0.1, help="权重 L1 惩罚系数。")
     parser.add_argument("--vague-threshold", type=float, default=0.51, help="单策略正确率低于该阈值时标记 vague。")
+    parser.add_argument("--min-effective-action-count", type=int, default=4, help="普通段落最少有效动作数，低于该值直接标为 vague。")
+    parser.add_argument(
+        "--min-effective-action-ratio",
+        type=float,
+        default=0.5,
+        help="普通段落有效动作占比下限，低于该值直接标为 vague。",
+    )
     return parser.parse_args()
 
 
@@ -83,6 +90,8 @@ def build_config(args: argparse.Namespace) -> DynamicStrategyFittingConfig:
         random_seed=args.seed,
         segment_workers=args.segment_workers,
         use_segment_seed=args.use_segment_seed or args.segment_workers > 1,
+        min_effective_action_count=args.min_effective_action_count,
+        min_effective_action_ratio=args.min_effective_action_ratio,
     )
 
 

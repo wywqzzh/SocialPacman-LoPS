@@ -45,12 +45,17 @@ LEGACY_STATUS_COLUMNS: tuple[str, ...] = ("ifscared1", "ifscared2")
 class CalculateUtilityConfig:
     """保存集中 utility 计算阶段的配置。
 
-    输入语义：utility_config 控制 raw Q 的策略深度等参数。
+    输入语义：utility_config 控制 raw Q 的策略深度等参数；global_cluster_radius
+    控制 cluster global 可考虑的最远资源团距离；global_cluster_distance_threshold
+    控制 cluster global 候选中资源点的聚类半径。
     输出语义：配置对象被文件级和目录级处理函数共享。
-    关键约束：当前阶段不引入随机拟合参数，只包装 Q 计算本身的配置。
+    关键约束：当前阶段只生成逐行候选 utility，不根据 context 选择 best global；
+    best global 的选择发生在 06b。
     """
 
     utility_config: UtilityConfig = UtilityConfig()
+    global_cluster_radius: int = 60
+    global_cluster_distance_threshold: int = 3
 
 
 def parse_literal_if_needed(value: Any) -> Any:
@@ -78,6 +83,220 @@ def parse_position(value: Any) -> tuple[int, int]:
     if not isinstance(parsed, (tuple, list)) or len(parsed) != 2:
         raise ValueError(f"无法解析位置字段：{value!r}")
     return int(parsed[0]), int(parsed[1])
+
+
+def parse_position_list(value: Any) -> list[tuple[int, int]]:
+    """把资源列表字段解析为坐标列表。
+
+    输入语义：value 通常来自 ``beans`` 或 ``energizers``，可以是字符串列表、
+    Python list/tuple、空列表或缺失值。
+    输出语义：返回去除非法元素后的 ``(x, y)`` 坐标列表。
+    关键约束：本函数用于 cluster global 候选生成；缺失资源按空列表处理，
+    单个非法元素会被跳过，避免一条脏资源记录中断整个文件计算。
+    """
+
+    if value is None or (isinstance(value, (float, np.floating)) and pd.isna(value)):
+        return []
+    parsed = parse_literal_if_needed(value)
+    if parsed is None or (isinstance(parsed, (float, np.floating)) and pd.isna(parsed)):
+        return []
+    if isinstance(parsed, np.ndarray):
+        parsed = parsed.tolist()
+    if not isinstance(parsed, (list, tuple)):
+        return []
+
+    positions: list[tuple[int, int]] = []
+    for item in parsed:
+        try:
+            positions.append(parse_position(item))
+        except (TypeError, ValueError):
+            continue
+    return positions
+
+
+def map_distance(map_data: MapData, first: tuple[int, int], second: tuple[int, int]) -> float:
+    """读取两个 tile 之间的地图最短路距离。
+
+    输入语义：first/second 是 tile 坐标，map_data 来自统一地图常量。
+    输出语义：返回最短路距离，无法到达或缺失时返回 ``np.inf``。
+    关键约束：必须使用地图距离表而不是坐标差；这样 tunnel 两端例如
+    ``(0, 18)`` 和 ``(29, 18)`` 会被正确视为相邻。
+    """
+
+    if first == second:
+        return 0.0
+    return float(map_data.distance_by_position.get(first, {}).get(second, np.inf))
+
+
+def cluster_resources_by_distance(
+    resources: list[tuple[int, int]],
+    map_data: MapData,
+    distance_threshold: int,
+) -> list[set[tuple[int, int]]]:
+    """按地图最短路距离把资源点聚成多个 global 目标团。
+
+    输入语义：resources 是当前行剩余 ``beans + energizers``，distance_threshold
+    是两个资源点可被合并为同一团的最大地图距离。
+    输出语义：返回资源坐标集合列表，每个集合对应一个候选 global 目标。
+    关键约束：cluster size 允许为 1；聚类用 union-find 连接所有距离不超过阈值的
+    资源对，因此 tunnel 连通性完全由 map_data 控制。
+    """
+
+    unique_resources = sorted(set(resources))
+    parent = {position: position for position in unique_resources}
+
+    def find(position: tuple[int, int]) -> tuple[int, int]:
+        """查找 union-find 根节点，并压缩路径。"""
+
+        while parent[position] != position:
+            parent[position] = parent[parent[position]]
+            position = parent[position]
+        return position
+
+    def union(first: tuple[int, int], second: tuple[int, int]) -> None:
+        """合并两个资源点所在的 cluster。"""
+
+        first_root = find(first)
+        second_root = find(second)
+        if first_root != second_root:
+            parent[second_root] = first_root
+
+    for first_index, first in enumerate(unique_resources):
+        for second in unique_resources[first_index + 1 :]:
+            if map_distance(map_data, first, second) <= distance_threshold:
+                union(first, second)
+
+    groups: dict[tuple[int, int], set[tuple[int, int]]] = {}
+    for position in unique_resources:
+        groups.setdefault(find(position), set()).add(position)
+    return sorted(groups.values(), key=lambda cluster: sorted(cluster))
+
+
+def cluster_min_distance(
+    position: tuple[int, int],
+    cluster: set[tuple[int, int]],
+    map_data: MapData,
+) -> float:
+    """计算当前位置到一个资源 cluster 的最短距离。
+
+    输入语义：position 是 Pacman 当前位置，cluster 是一团资源坐标。
+    输出语义：返回到该 cluster 中最近资源点的地图最短路距离。
+    关键约束：如果 cluster 为空或不可达，返回 ``np.inf``，下游会把该候选视为无信息。
+    """
+
+    if not cluster:
+        return float("inf")
+    return float(min(map_distance(map_data, position, resource) for resource in cluster))
+
+
+def nearest_cluster_resource(
+    position: tuple[int, int],
+    cluster: set[tuple[int, int]],
+    map_data: MapData,
+) -> tuple[int, int] | None:
+    """返回 cluster 中离当前位置最近的资源点。
+
+    输入语义：position 是 Pacman 当前位置，cluster 是候选资源团。
+    输出语义：返回最近资源点；cluster 为空时返回 None。
+    关键约束：该字段只用于解释 best global 目标，不参与 Q 计算。
+    """
+
+    if not cluster:
+        return None
+    return min(cluster, key=lambda resource: map_distance(map_data, position, resource))
+
+
+def global_cluster_q_for_row(
+    row: pd.Series,
+    map_data: MapData,
+    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
+    config: CalculateUtilityConfig,
+) -> tuple[list[list[float]], list[list[float]], list[dict[str, Any]]]:
+    """为单行生成多个 cluster global 候选 utility。
+
+    输入语义：row 是单玩家视角的一行，包含 ``pacmanPos/beans/energizers``；
+    map_data/adjacent_map 来自统一地图常量；config 提供聚类阈值和 global 距离范围。
+    输出语义：返回 raw utility 矩阵、normalized utility 矩阵和与矩阵行对齐的 meta。
+    关键约束：这里不选择 best cluster。每个 cluster 的四方向 raw Q 表示“走该方向后
+    到这团资源的距离减少量 × cluster_size”；普通豆和 energizer 在 global 中同权重，
+    因此 cluster_size 只按资源点数量计数。
+    """
+
+    position = parse_position(row["pacmanPos"])
+    beans = parse_position_list(row.get("beans", []))
+    energizers = parse_position_list(row.get("energizers", []))
+    energizer_set = set(energizers)
+    clusters = cluster_resources_by_distance(
+        beans + energizers,
+        map_data,
+        config.global_cluster_distance_threshold,
+    )
+
+    raw_matrix: list[list[float]] = []
+    meta_values: list[dict[str, Any]] = []
+    for cluster_id, cluster in enumerate(clusters):
+        min_distance = cluster_min_distance(position, cluster, map_data)
+        raw_q = [float("-inf")] * len(DIRECTION_NAMES)
+        in_global_range = (
+            np.isfinite(min_distance)
+            and min_distance > config.utility_config.global_ignore_depth
+            and min_distance <= config.global_cluster_radius
+        )
+
+        for direction_index, direction in enumerate(DIRECTION_NAMES):
+            adjacent_value = adjacent_map[position][direction]
+            if not isinstance(adjacent_value, tuple):
+                continue
+            if not in_global_range:
+                raw_q[direction_index] = 0.0
+                continue
+            next_distance = cluster_min_distance(adjacent_value, cluster, map_data)
+            if np.isfinite(next_distance):
+                # 一个资源点和一个 energizer 在 global 中贡献相同，cluster_size 因此是
+                # 目标团总资源数。后续 06 用归一化 Q 拟合，raw Q 主要保留解释尺度。
+                raw_q[direction_index] = (min_distance - next_distance) * len(cluster)
+            else:
+                raw_q[direction_index] = 0.0
+
+        raw_matrix.append(raw_q)
+        resources = sorted(cluster)
+        meta_values.append(
+            {
+                "cluster_id": cluster_id,
+                "cluster_size": len(resources),
+                "resource_positions": resources,
+                "nearest_resource": nearest_cluster_resource(position, cluster, map_data),
+                "contains_energizer": any(resource in energizer_set for resource in resources),
+                "min_distance": min_distance,
+            }
+        )
+
+    norm_matrix = [normalize_global_cluster_q(row_values).tolist() for row_values in raw_matrix]
+    return raw_matrix, norm_matrix, meta_values
+
+
+def normalize_global_cluster_q(values: Any) -> np.ndarray:
+    """归一化单个 cluster 的四方向 global Q。
+
+    输入语义：values 是长度为 4 的 raw Q，墙方向为 ``-inf``，可走方向可能为正、
+    负或 0。
+    输出语义：若存在正向推进，则用最大正值归一化；若没有任何正向推进，则所有
+    可走方向都置为 0，墙方向保持 ``-inf``。
+    关键约束：这个规则会把“只是没有变远”与“真正接近目标 cluster”区分开；
+    06 选择 best global 时也会据此把全 0 候选视为无预测信息。
+    """
+
+    source = np.asarray(values, dtype=float)
+    result = source.copy()
+    finite_indices = np.where(~np.isinf(source))[0]
+    if len(finite_indices) == 0:
+        return result
+    positive_values = source[finite_indices][source[finite_indices] > 0]
+    if len(positive_values) == 0:
+        result[finite_indices] = 0.0
+        return result
+    result[finite_indices] = result[finite_indices] / np.max(positive_values)
+    return result
 
 
 def load_adjacent_map(path: str | Path) -> dict[tuple[int, int], dict[str, tuple[int, int] | float]]:
@@ -406,6 +625,59 @@ def prefixed_q_columns(player: str) -> list[str]:
     return [f"{player}_{column}" for column in (*Q_COLUMNS, *Q_NORM_COLUMNS)]
 
 
+def global_cluster_candidate_columns() -> tuple[str, str, str]:
+    """返回 05 阶段新增的 cluster global 候选字段。
+
+    输入语义：无。
+    输出语义：返回 raw 候选矩阵、归一化候选矩阵和候选 meta 三个无玩家前缀字段名。
+    关键约束：这些字段只是候选池，不直接进入 06 的 GA 拟合；06b 会先选择 best
+    cluster，再覆盖正式 ``global_Q/global_Q_norm`` 字段。
+    """
+
+    return ("global_utility_k", "global_utility_k_norm", "global_utility_k_meta")
+
+
+def prefixed_global_cluster_candidate_columns(player: str) -> list[str]:
+    """返回某个玩家对应的 cluster global 候选字段名。
+
+    输入语义：player 是 ``p1`` 或 ``p2``。
+    输出语义：返回带玩家前缀的候选字段名列表。
+    关键约束：候选字段与普通 Q 字段一起保存在 05 输出，供 06b context 预处理读取。
+    """
+
+    return [f"{player}_{column}" for column in global_cluster_candidate_columns()]
+
+
+def append_global_cluster_candidate_columns(
+    data: pd.DataFrame,
+    map_data: MapData,
+    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
+    config: CalculateUtilityConfig,
+) -> pd.DataFrame:
+    """为单玩家视角追加 cluster global 候选字段。
+
+    输入语义：data 是已经完成普通 Q 和 Q_norm 计算的单玩家视角表。
+    输出语义：返回追加 ``global_utility_k*`` 三个字段的新 DataFrame。
+    关键约束：本函数不修改 ``global_Q``；旧 global 仍保留作兼容检查，06b 会在
+    context 级选择 best cluster 后覆盖正式 global 字段。
+    """
+
+    result = data.copy(deep=True)
+    raw_values: list[list[list[float]]] = []
+    norm_values: list[list[list[float]]] = []
+    meta_values: list[list[dict[str, Any]]] = []
+    for _, row in result.iterrows():
+        raw_matrix, norm_matrix, meta = global_cluster_q_for_row(row, map_data, adjacent_map, config)
+        raw_values.append(raw_matrix)
+        norm_values.append(norm_matrix)
+        meta_values.append(meta)
+
+    result["global_utility_k"] = raw_values
+    result["global_utility_k_norm"] = norm_values
+    result["global_utility_k_meta"] = meta_values
+    return result
+
+
 def calculate_player_utility(
     frame_data: pd.DataFrame,
     player: str,
@@ -422,7 +694,7 @@ def calculate_player_utility(
 
     row_mask = build_player_alive_mask(frame_data, player)
     output = pd.DataFrame(index=frame_data.index)
-    for column in prefixed_q_columns(player):
+    for column in (*prefixed_q_columns(player), *prefixed_global_cluster_candidate_columns(player)):
         output[column] = pd.Series([np.nan] * len(frame_data), index=frame_data.index, dtype=object)
 
     if not row_mask.any():
@@ -441,9 +713,15 @@ def calculate_player_utility(
     raw_utility = restore_standard_input_columns(raw_utility, player_view)
     corrected_utility, changed_cells = correct_unavailable_q_values(raw_utility, adjacent_map)
     calculated_utility = prepare_calculated_utility_dataframe(corrected_utility, adjacent_map)
+    calculated_utility = append_global_cluster_candidate_columns(
+        calculated_utility,
+        map_data,
+        adjacent_map,
+        config,
+    )
 
     target_indices = frame_data.index[row_mask]
-    for source_column in (*Q_COLUMNS, *Q_NORM_COLUMNS):
+    for source_column in (*Q_COLUMNS, *Q_NORM_COLUMNS, *global_cluster_candidate_columns()):
         target_column = f"{player}_{source_column}"
         # calculated_utility 已 reset index，因此这里按顺序写回原 joint 行。
         for target_index, value in zip(target_indices, calculated_utility[source_column].to_numpy()):

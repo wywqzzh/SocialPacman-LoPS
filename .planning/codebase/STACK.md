@@ -1,5 +1,9 @@
 # Technology Stack
 
+> 历史快照：本文记录 2026-06-22 的环境探测结果，不保证当前本地虚拟环境、文件数量
+> 或脚本清单仍相同。依赖声明以 `pyproject.toml` 为准；未声明但被代码使用的可选依赖
+> 见 `README.md` 和 `data/README.md`。
+
 **Analysis Date:** 2026-06-22
 
 ## Languages

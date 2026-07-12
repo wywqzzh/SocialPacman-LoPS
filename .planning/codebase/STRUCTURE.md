@@ -1,5 +1,9 @@
 # Codebase Structure
 
+> 历史快照：本文的目录树、文件数量和主流程映射来自 2026-06-22，未包含后续分支。
+> 当前代码结构和数据流请以实际目录、`README.md`、`data/README.md` 与
+> `docs/data_flow.html` 为准。
+
 **Analysis Date:** 2026-06-22
 
 ## Directory Layout

@@ -55,6 +55,8 @@ class UtilityConfig:
     输入语义：调用方可覆盖旧脚本中写死的深度、阈值、随机和惰性系数。
     输出语义：策略构造时从该配置读取参数，默认值复现 fMRI 目标路径。
     关键约束：默认随机系数和惰性系数均为 0，因此保存的 Q 值不受随机数影响。
+    Local 默认使用 0.90 的逐步奖励衰减：第 j 步资源奖励乘以 ``0.9**(j-1)``，
+    使更直接到达的最佳路径优于绕路后汇合到同一资源的路径。
     Evade 默认只搜索 6 步，把它限定为对近距离正常 ghost 的即时躲避策略，避免把
     7--10 步外、恰好与资源目标反向的远处 ghost 误解释成主动躲避目标。
     Approach 默认搜索 20 步，用于表达玩家在 energizer 后跨较长地图距离追逐 scared
@@ -68,6 +70,7 @@ class UtilityConfig:
     global_ghost_attractive_thr: int = 34
     global_ghost_repulsive_thr: int = 34
     local_depth: int = 10
+    local_discount_factor: float = 0.90
     local_ghost_attractive_thr: int = 10
     local_ghost_repulsive_thr: int = 10
     evade_depth: int = 6

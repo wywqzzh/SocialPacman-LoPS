@@ -1,5 +1,9 @@
 # Codebase Concerns
 
+> 历史快照：本文记录 2026-06-22 的审计结论，行数、测试范围、数据数量和流程缺口
+> 可能已经变化。当前运行接口请以 `README.md`、`data/README.md` 和
+> `docs/data_flow.html` 为准；本文只用于追溯当时的技术债判断。
+
 **Analysis Date:** 2026-06-22
 
 ## Tech Debt

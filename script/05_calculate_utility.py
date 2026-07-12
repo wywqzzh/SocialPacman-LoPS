@@ -62,9 +62,26 @@ def parse_args() -> argparse.Namespace:
         default=10,
         help="旧 Global 区域搜索的近距离 bean 忽略深度；不限制 cluster Global。",
     )
+    parser.add_argument(
+        "--global-cluster-min-distance",
+        type=int,
+        default=2,
+        help="Cluster Global 提供方向信息所需的最小资源团距离；距离 0/1 默认为 Local。",
+    )
     parser.add_argument("--global-cluster-radius", type=int, default=60, help="Cluster Global 可考虑的最远资源团距离。")
-    parser.add_argument("--global-cluster-distance-threshold", type=int, default=3, help="Cluster Global 中资源点聚类的地图距离阈值。")
+    parser.add_argument(
+        "--global-cluster-distance-threshold",
+        type=int,
+        default=2,
+        help="Cluster Global 资源聚类阈值；距离 2 表示豆子之间最多允许一个空格。",
+    )
     parser.add_argument("--local-depth", type=int, default=10, help="Local 路径树深度。")
+    parser.add_argument(
+        "--local-discount-factor",
+        type=float,
+        default=0.90,
+        help="Local 最佳路径中逐步资源奖励的距离衰减因子 gamma。",
+    )
     parser.add_argument(
         "--evade-depth",
         type=int,
@@ -102,6 +119,7 @@ def build_config(args: argparse.Namespace) -> CalculateUtilityConfig:
         global_depth=args.global_depth,
         global_ignore_depth=args.global_ignore_depth,
         local_depth=args.local_depth,
+        local_discount_factor=args.local_discount_factor,
         evade_depth=args.evade_depth,
         approach_depth=args.approach_depth,
         energizer_depth=args.energizer_depth,
@@ -109,6 +127,7 @@ def build_config(args: argparse.Namespace) -> CalculateUtilityConfig:
     )
     return CalculateUtilityConfig(
         utility_config=utility_config,
+        global_cluster_min_distance=args.global_cluster_min_distance,
         global_cluster_radius=args.global_cluster_radius,
         global_cluster_distance_threshold=args.global_cluster_distance_threshold,
     )
@@ -168,6 +187,7 @@ def main() -> None:
                 "players": summarize_players(summaries),
                 "output_dir": str(args.output_dir),
                 "workers": args.workers,
+                "global_cluster_min_distance": args.global_cluster_min_distance,
                 "global_cluster_radius": args.global_cluster_radius,
                 "global_cluster_distance_threshold": args.global_cluster_distance_threshold,
             },

@@ -45,18 +45,19 @@ LEGACY_STATUS_COLUMNS: tuple[str, ...] = ("ifscared1", "ifscared2")
 class CalculateUtilityConfig:
     """保存集中 utility 计算阶段的配置。
 
-    输入语义：utility_config 控制旧七策略 raw Q 的深度等参数；global_cluster_radius
-    控制 cluster Global 可考虑的最远资源团距离；global_cluster_distance_threshold
-    控制 cluster Global 候选中资源点的聚类半径。utility_config 中旧 Global 使用的
-    global_ignore_depth 不再限制 cluster Global，因为后者表示持续朝特定资源团移动。
+    输入语义：utility_config 控制旧七策略 raw Q 的深度等参数；
+    global_cluster_min_distance/global_cluster_radius 控制 cluster Global 提供方向信息的
+    最近和最远资源团距离；global_cluster_distance_threshold 控制候选资源点的聚类半径。
+    utility_config 中旧 Global 使用的 global_ignore_depth 不直接限制 cluster Global。
     输出语义：配置对象被文件级和目录级处理函数共享。
     关键约束：当前阶段只生成逐行候选 utility，不根据 context 选择 best global；
     best global 的选择发生在 06b。
     """
 
     utility_config: UtilityConfig = UtilityConfig()
+    global_cluster_min_distance: int = 2
     global_cluster_radius: int = 60
-    global_cluster_distance_threshold: int = 3
+    global_cluster_distance_threshold: int = 2
 
 
 def parse_literal_if_needed(value: Any) -> Any:
@@ -220,8 +221,8 @@ def global_cluster_q_for_row(
     输出语义：返回 raw utility 矩阵、normalized utility 矩阵和与矩阵行对齐的 meta。
     关键约束：这里不选择 best cluster。每个 cluster 的四方向 raw Q 表示“走该方向后
     到这团资源的距离减少量 × cluster_size”；普通豆和 energizer 在 Global 中同权重，
-    因此 cluster_size 只按资源点数量计数。目标团进入 10 步范围后仍继续计算 Q，Global
-    与 Local 由“持续目标团”和“附近即时资源”区分，而不再由硬距离阈值强制切换。
+    因此 cluster_size 只按资源点数量计数。当最近资源距离小于配置的 Global 最小距离时，
+    候选仍保留用于跨行追踪，但合法方向全部置零，避免紧邻资源的局部采食与 Local 重叠。
     """
 
     position = parse_position(row["pacmanPos"])
@@ -239,10 +240,13 @@ def global_cluster_q_for_row(
     for cluster_id, cluster in enumerate(clusters):
         min_distance = cluster_min_distance(position, cluster, map_data)
         raw_q = [float("-inf")] * len(DIRECTION_NAMES)
-        # Cluster Global 表示玩家是否持续朝某个特定资源团移动，因此接近目标团后也应
-        # 保留方向证据。旧 Global 的 global_ignore_depth=10 只属于旧区域搜索定义；若
-        # 在这里复用，会使同一长 context 的后半段突然变成全零，并错误压低正确目标团。
-        in_global_range = np.isfinite(min_distance) and min_distance <= config.global_cluster_radius
+        # Global 只解释尚需一定路程才能到达的资源团。距离为 0/1 时，下一步采食属于
+        # Local 的即时资源范围；此时保留 cluster/meta，但让所有合法方向成为无信息 0。
+        # 最小阈值只排除紧邻资源，不恢复旧版 10 步忽略区间。
+        in_global_range = (
+            np.isfinite(min_distance)
+            and config.global_cluster_min_distance <= min_distance <= config.global_cluster_radius
+        )
 
         for direction_index, direction in enumerate(DIRECTION_NAMES):
             adjacent_value = adjacent_map[position][direction]

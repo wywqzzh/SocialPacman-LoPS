@@ -1,5 +1,9 @@
 # PreEstimation_fmri 重构分析与方案
 
+> 历史方案：本文记录早期 PreEstimation_fmri 重构过程和旧实现语义，不是当前 05–07
+> 分支的运行手册。当前默认 05 已使用 cluster-global 输出，06b/06c/07c 的接口与状态
+> 请以 `README.md`、`data/README.md` 和 `docs/data_flow.html` 为准。
+
 ## 目标脚本
 
 - 原始脚本：`/home/zzh/project/Pacman/Language-of-Problem-Solving/Behavior_Analysis/HierarchicalModel/PreEstimation_fmri.py`

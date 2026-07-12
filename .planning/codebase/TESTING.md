@@ -1,5 +1,8 @@
 # Testing Patterns
 
+> 历史快照：本文的测试文件数、覆盖范围和数据基线来自 2026-06-22。后续已新增 04、
+> 05 数值、07、06c posterior 和 tile 视频编号测试；当前测试集合应以 `tests/` 实际内容为准。
+
 **Analysis Date:** 2026-06-22
 
 ## Test Framework

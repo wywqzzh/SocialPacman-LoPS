@@ -15,6 +15,7 @@ from LoPS.calculate_utility.processing import (
     build_player_alive_mask,
     build_player_view,
     build_utility_estimation_input,
+    cluster_resources_by_distance,
     correct_unavailable_q_values,
     global_cluster_q_for_row,
     load_calculate_utility_maps,
@@ -41,6 +42,54 @@ EVADE_TARGET_FRAME_ID = 1407
 class CalculateUtilityStatusAndNormalizationTests(unittest.TestCase):
     """覆盖状态类型修复、真实 utility 回归样例和归一化数组隔离。"""
 
+    def test_cluster_global_allows_one_empty_tile_but_not_two(self) -> None:
+        """验证资源聚类只允许两个豆子之间存在至多一个空格。
+
+        输入语义：使用四格直线地图，分别构造地图距离为 2 和 3 的两个资源点。
+        输出语义：距离 2 的资源属于同一连通分量，距离 3 的资源保持为两个候选团。
+        关键约束：距离按移动边数计算，因此距离 2 对应一个中间空格，距离 3 对应
+        两个中间空格；测试使用默认阈值，避免配置默认值以后悄然回退。
+        """
+
+        positions = [(index, 0) for index in range(4)]
+        adjacent_map = {
+            position: {
+                "left": (position[0] - 1, 0) if position[0] > 0 else np.nan,
+                "right": (position[0] + 1, 0) if position[0] < 3 else np.nan,
+                "up": np.nan,
+                "down": np.nan,
+            }
+            for position in positions
+        }
+        distance_map = {
+            source: {target: abs(source[0] - target[0]) for target in positions}
+            for source in positions
+        }
+        map_data = MapData(adjacent_map, distance_map, {1: 2, 2: 4, 8: 8, 9: 8})
+        threshold = CalculateUtilityConfig().global_cluster_distance_threshold
+
+        one_empty_tile = cluster_resources_by_distance([(0, 0), (2, 0)], map_data, threshold)
+        two_empty_tiles = cluster_resources_by_distance([(0, 0), (3, 0)], map_data, threshold)
+
+        self.assertEqual(threshold, 2)
+        self.assertEqual(one_empty_tile, [{(0, 0), (2, 0)}])
+        self.assertEqual(two_empty_tiles, [{(0, 0)}, {(3, 0)}])
+
+    def test_tunnel_side_beans_are_not_clustered_across_two_empty_tiles(self) -> None:
+        """验证 tunnel 两侧豆子不会跨越坐标 0 和 29 合并。
+
+        输入语义：读取正式地图，聚类 tunnel 两侧的 ``(1,18)`` 与 ``(28,18)``。
+        输出语义：两点分别形成独立候选团。
+        关键约束：地图仍保留 ``(0,18)`` 与 ``(29,18)`` 的移动连通；这里只验证两颗
+        豆子的最短路为 3，超过默认聚类阈值 2，不修改 tunnel 行为拓扑。
+        """
+
+        map_data, _ = load_calculate_utility_maps(CONSTANT_DIR)
+        threshold = CalculateUtilityConfig().global_cluster_distance_threshold
+        clusters = cluster_resources_by_distance([(1, 18), (28, 18)], map_data, threshold)
+
+        self.assertEqual(clusters, [{(1, 18)}, {(28, 18)}])
+
     def test_default_evade_depth_is_six_tiles(self) -> None:
         """验证正式 utility 默认只搜索 6 步内的 Evade 威胁。
 
@@ -62,6 +111,16 @@ class CalculateUtilityStatusAndNormalizationTests(unittest.TestCase):
         """
 
         self.assertEqual(UtilityConfig().approach_depth, 20)
+
+    def test_default_local_discount_factor_is_point_nine(self) -> None:
+        """验证 Local 最佳路径默认使用0.90逐步奖励衰减。
+
+        输入语义：直接读取默认 UtilityConfig。
+        输出语义：local_discount_factor 必须为0.90。
+        关键约束：该参数只作用于 Local 路径资源奖励，不改变其它路径策略。
+        """
+
+        self.assertEqual(UtilityConfig().local_discount_factor, 0.90)
 
     def test_status_value_distinguishes_finite_float_from_missing(self) -> None:
         """验证有限整值 float 保留状态含义，只有真正缺失值映射为 0。"""
@@ -159,31 +218,30 @@ class CalculateUtilityStatusAndNormalizationTests(unittest.TestCase):
             np.testing.assert_array_equal(data.at[0, column], before[column])
             np.testing.assert_array_equal(result.at[0, column], before[column])
 
-    def test_cluster_global_remains_informative_inside_legacy_ignore_depth(self) -> None:
-        """验证目标团进入旧 10 步忽略范围后，cluster Global 仍指向该目标。
+    def test_cluster_global_excludes_distance_one_but_keeps_distance_two(self) -> None:
+        """验证 Cluster Global 在距离 1 时无信息、距离 2 时恢复方向证据。
 
-        输入语义：构造三格直线地图，Pacman 与唯一豆子只相距一步，并把旧 Global
-        ignore depth 保持为默认 10。
-        输出语义：向右接近豆子的 cluster Global Q 必须为正，向左远离时必须为负。
-        关键约束：该测试只约束新增的 cluster Global；旧区域 Global 仍可使用自己的
-        ignore depth，Local 的搜索范围也不受影响。
+        输入语义：构造四格直线地图，分别让 Pacman 与唯一豆子相距 1 步和 2 步。
+        输出语义：距离 1 的合法方向均为 0；距离 2 时向右接近为正、向左远离为负。
+        关键约束：最小距离只区分紧邻资源的 Local 行为，不恢复旧版 10 步忽略范围。
         """
 
-        positions = [(0, 0), (1, 0), (2, 0)]
+        positions = [(0, 0), (1, 0), (2, 0), (3, 0)]
         adjacent_map = {
             (0, 0): {"left": np.nan, "right": (1, 0), "up": np.nan, "down": np.nan},
             (1, 0): {"left": (0, 0), "right": (2, 0), "up": np.nan, "down": np.nan},
-            (2, 0): {"left": (1, 0), "right": np.nan, "up": np.nan, "down": np.nan},
+            (2, 0): {"left": (1, 0), "right": (3, 0), "up": np.nan, "down": np.nan},
+            (3, 0): {"left": (2, 0), "right": np.nan, "up": np.nan, "down": np.nan},
         }
         distance_map = {
             source: {target: abs(source[0] - target[0]) for target in positions}
             for source in positions
         }
         map_data = MapData(adjacent_map, distance_map, {1: 2, 2: 4, 8: 8, 9: 8})
-        row = pd.Series({"pacmanPos": (1, 0), "beans": [(2, 0)], "energizers": []})
+        adjacent_row = pd.Series({"pacmanPos": (1, 0), "beans": [(2, 0)], "energizers": []})
 
         raw_matrix, normalized_matrix, metadata = global_cluster_q_for_row(
-            row,
+            adjacent_row,
             map_data,
             adjacent_map,
             CalculateUtilityConfig(),
@@ -191,6 +249,17 @@ class CalculateUtilityStatusAndNormalizationTests(unittest.TestCase):
 
         self.assertEqual(len(raw_matrix), 1)
         self.assertEqual(metadata[0]["min_distance"], 1.0)
+        np.testing.assert_allclose(np.asarray(raw_matrix[0])[[0, 1]], [0.0, 0.0])
+        np.testing.assert_allclose(np.asarray(normalized_matrix[0])[[0, 1]], [0.0, 0.0])
+
+        distant_row = pd.Series({"pacmanPos": (1, 0), "beans": [(3, 0)], "energizers": []})
+        raw_matrix, normalized_matrix, metadata = global_cluster_q_for_row(
+            distant_row,
+            map_data,
+            adjacent_map,
+            CalculateUtilityConfig(),
+        )
+        self.assertEqual(metadata[0]["min_distance"], 2.0)
         self.assertLess(raw_matrix[0][0], 0.0)
         self.assertGreater(raw_matrix[0][1], 0.0)
         self.assertEqual(normalized_matrix[0][1], 1.0)
@@ -216,6 +285,29 @@ class CalculateUtilityStatusAndNormalizationTests(unittest.TestCase):
         )
         evade_q = np.asarray(utility.at[0, "evade_blinky_Q"], dtype=float)
         self.assertLess(float(np.min(evade_q[np.isfinite(evade_q)])), 0.0)
+
+    def test_real_frame_6_local_uses_best_leaf_path(self) -> None:
+        """验证 Local 按首方向的最大叶路径奖励聚合，而不是对所有路径取平均。
+
+        输入语义：01-01 trial 的 0-based 第6帧中，P2 位于 (13,27)；向左五条叶路径
+        奖励为 [4,4,2,0,14]，向上为 [10,8,8,8,8]。
+        输出语义：Local Q 必须取逐步衰减后的最大值，且正确偏好真实动作 left。
+        关键约束：该回归只改变 Local；墙方向 down 仍保持负无穷。
+        """
+
+        utility = self._estimate_real_player_frame(
+            player="p2",
+            trial=EVADE_TARGET_TRIAL,
+            frame_id=88,
+        )
+        local_q = np.asarray(utility.at[0, "local_Q"], dtype=float)
+        gamma = UtilityConfig().local_discount_factor
+        expected_left = 2.0 * sum(gamma**depth_index for depth_index in range(3, 10))
+        expected_right = 2.0 * sum(gamma**depth_index for depth_index in range(8, 10))
+        expected_up = 2.0 * sum(gamma**depth_index for depth_index in range(5, 10))
+        np.testing.assert_allclose(local_q[:3], [expected_left, expected_right, expected_up])
+        self.assertTrue(np.isneginf(local_q[3]))
+        self.assertGreater(local_q[0], local_q[2])
 
     def _estimate_real_player_frame(self, player: str, trial: str, frame_id: int) -> pd.DataFrame:
         """读取一个真实 tile，按修复后的 05 输入路径计算并修正不可走方向。

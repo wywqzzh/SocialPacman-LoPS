@@ -571,39 +571,63 @@ def action_is_missing(value: Any) -> bool:
 def suppress_bean_boundaries_near_events(
     bean_start_points: set[int],
     bean_end_points: set[int],
-    event_boundaries: set[int],
+    directional_event_boundaries: set[int],
     window: int,
+    *,
+    symmetric_event_boundaries: set[int] | None = None,
 ) -> set[int]:
-    """按事件方向找出强事件附近应取消的普通豆边界。
+    """找出方向性边界或对称强事件附近应取消的普通豆边界。
 
     输入语义：bean_start_points/bean_end_points 分别是连续吃普通豆过程的首个和末个
-    实际事件行；event_boundaries 包含 trial、生死、energizer、吃 ghost 和长 stay 等
-    强事件点；window 是前后时间窗口，单位为 tile。
+    实际事件行；directional_event_boundaries 包含 trial 和长 stay 等只替代朝向自身一侧
+    吃豆边界的事件点；symmetric_event_boundaries 包含生死、energizer 和吃 ghost 等会
+    替代前后两侧任意吃豆边界的行为强事件；window 是时间窗口，单位为 tile。
     输出语义：返回需要从普通豆边界集合中删除的局部边界下标。
-    关键约束：只删除“朝向强事件”的一侧边界：强事件前 window 内的吃豆结束点，
-    以及强事件后 window 内的吃豆开始点。未来强事件不能删除此前的吃豆开始，过去
-    强事件也不能删除此后的吃豆结束。函数绝不删除强事件本身；距离使用同一 trial
-    内的 tile 下标，而不是地图空间距离。
+    关键约束：方向性边界只删除“朝向事件”的一侧，即事件前的吃豆结束点和事件后的
+    吃豆开始点；对称强事件删除其前后 window 内的所有吃豆开始/结束点。函数绝不删除
+    事件本身；距离使用同一 trial 内的 tile 下标，而不是地图空间距离。
     """
 
     if window < 0:
         raise ValueError("bean event suppression window 不能小于 0。")
 
-    # 吃豆开始点只有在强事件已经发生、且开始点紧随其后时才冗余。例如 energizer
-    # 后立刻继续吃普通豆时，energizer 强边界已经足以标记新阶段。
-    suppressed_starts = {
+    symmetric_boundaries = symmetric_event_boundaries or set()
+
+    # Trial 或长 stay 只替代事件朝向一侧的普通豆边界：事件后的吃豆开始，以及事件前
+    # 的吃豆结束。这保留了另一侧真实采食过程的开始/结束语义。
+    directionally_suppressed_starts = {
         bean_start
         for bean_start in bean_start_points
-        if any(0 <= bean_start - event_boundary <= window for event_boundary in event_boundaries)
+        if any(
+            0 <= bean_start - event_boundary <= window
+            for event_boundary in directional_event_boundaries
+        )
     }
-    # 吃豆结束点只有在强事件即将发生、且位于结束点之后时才冗余。例如吃豆后立刻
-    # 吃 energizer 或进入长 stay，保留后面的强边界即可。
-    suppressed_ends = {
+    directionally_suppressed_ends = {
         bean_end
         for bean_end in bean_end_points
-        if any(0 <= event_boundary - bean_end <= window for event_boundary in event_boundaries)
+        if any(
+            0 <= event_boundary - bean_end <= window
+            for event_boundary in directional_event_boundaries
+        )
     }
-    return suppressed_starts | suppressed_ends
+
+    # 生死、本人吃 energizer 和本人吃 ghost 会独立定义行为阶段。其前后短窗口内的普通
+    # 豆开始/结束事件都属于同一强行为转变附近的局部碎片，因此不再区分事件位于哪侧、
+    # 也不区分普通豆边界是开始还是结束。
+    symmetrically_suppressed = {
+        bean_boundary
+        for bean_boundary in bean_start_points | bean_end_points
+        if any(
+            abs(bean_boundary - event_boundary) <= window
+            for event_boundary in symmetric_boundaries
+        )
+    }
+    return (
+        directionally_suppressed_starts
+        | directionally_suppressed_ends
+        | symmetrically_suppressed
+    )
 
 
 def suppress_stay_ranges_near_ghost(
@@ -660,7 +684,10 @@ def hard_boundary_points(
     """
 
     row_count = len(trial_data)
-    strong_boundaries: set[int] = {0, row_count}
+    # Trial 边界和保留下来的长 stay 采用方向性普通豆抑制；行为强事件采用前后对称抑制。
+    # 两类事件最终都是不可跨越的硬边界，区分集合只用于普通豆弱边界的去重。
+    directional_boundaries: set[int] = {0, row_count}
+    symmetric_boundaries: set[int] = set()
 
     # Pacman 生死变化会改变动作意义，死亡/复活前后的段落不能合并。
     alive_column = f"{player}_alive"
@@ -668,7 +695,7 @@ def hard_boundary_points(
         alive_values = trial_data[alive_column].astype(bool).tolist()
         for index in range(1, row_count):
             if alive_values[index] != alive_values[index - 1]:
-                strong_boundaries.add(index)
+                symmetric_boundaries.add(index)
 
     # 普通豆和 energizer 分开处理。事件列本身已经标在事件发生行，context 切段
     # 只能使用这些事件行，不能把导致事件的前一动作行当作事件边界。
@@ -707,7 +734,7 @@ def hard_boundary_points(
     # 加入 True 所在行；不再回推前一动作，也不人为构造一行宽的 [start, end) 区间。
     if eat_energizer_column in trial_data.columns:
         energizer_indices = trial_data.index[trial_data[eat_energizer_column].astype(bool)].tolist()
-        strong_boundaries.update(int(index) for index in energizer_indices)
+        symmetric_boundaries.update(int(index) for index in energizer_indices)
 
     # 吃 ghost 也只使用当前玩家自己的事件列。事件列标在 ghost 进入 dead 的行，
     # 这里沿用上一版做法，只把状态转变行作为硬边界。
@@ -716,7 +743,7 @@ def hard_boundary_points(
     if eat_ghost_column in trial_data.columns:
         eaten_indices = trial_data.index[trial_data[eat_ghost_column].astype(bool)].tolist()
         for index in eaten_indices:
-            strong_boundaries.add(int(index))
+            symmetric_boundaries.add(int(index))
 
     # 长 stay 默认作为强边界；但 ghost 被吃前后的停顿常来自交互/动画，而不是玩家主动
     # stay。若整段 stay 距当前玩家任一 eat_ghost 行不超过窗口，则同时取消其起止边界。
@@ -733,17 +760,19 @@ def hard_boundary_points(
     )
     for start, end in long_stay_ranges:
         if (start, end) not in suppressed_stay_ranges:
-            strong_boundaries.add(start)
-            strong_boundaries.add(end)
+            directional_boundaries.add(start)
+            directional_boundaries.add(end)
 
     suppressed_bean_boundaries = suppress_bean_boundaries_near_events(
         bean_start_points,
         bean_end_points,
-        strong_boundaries,
+        directional_boundaries,
         bean_event_suppression_window,
+        symmetric_event_boundaries=symmetric_boundaries,
     )
     bean_event_points = bean_start_points | bean_end_points
     retained_bean_boundaries = bean_event_points - suppressed_bean_boundaries
+    strong_boundaries = directional_boundaries | symmetric_boundaries
     boundaries = strong_boundaries | retained_bean_boundaries
     return {boundary for boundary in boundaries if 0 <= boundary <= row_count}
 

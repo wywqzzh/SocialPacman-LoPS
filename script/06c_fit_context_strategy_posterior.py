@@ -59,6 +59,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--beta-grid-size", type=int, default=81)
     parser.add_argument("--cv-folds", type=int, default=5)
     parser.add_argument("--posterior-threshold", type=float, default=0.70)
+    parser.add_argument(
+        "--min-information-coverage",
+        type=float,
+        default=0.50,
+        help="策略在一个 context 内能够区分合法方向的最小有效动作比例。",
+    )
+    parser.add_argument(
+        "--information-epsilon",
+        type=float,
+        default=1e-12,
+        help="判断归一化 Q 是否具有方向差异时使用的浮点容差。",
+    )
     parser.add_argument("--random-seed", type=int, default=20260610)
     return parser.parse_args()
 
@@ -97,6 +109,8 @@ def build_config(args: argparse.Namespace) -> ContextStrategyPosteriorConfig:
         beta_grid_size=args.beta_grid_size,
         cv_folds=args.cv_folds,
         posterior_threshold=args.posterior_threshold,
+        min_information_coverage=args.min_information_coverage,
+        information_epsilon=args.information_epsilon,
         random_seed=args.random_seed,
     )
 

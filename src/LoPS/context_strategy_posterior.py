@@ -2,7 +2,9 @@
 
 本模块复用 06b 已验证的玩家私有事件和 context 划分，再把每段 GA 权重拟合替换为
 概率模型：先按 06b 规则选择解释动作最好的 Global cluster，随后统一归一化七种
-策略的 raw Q，通过 softmax 得到动作概率，并在文件内拟合一个或两个 temperature。
+策略的 raw Q，通过 softmax 得到动作概率。context 内信息覆盖率不足的策略先被
+排除，posterior 和文件级 temperature 只使用覆盖率合格的行为策略。合法方向均匀
+分布的 Null 仅作为诊断基线，避免它否决覆盖充分但偶有高置信度错误的行为策略。
 
 06c 与 06b 完全隔离。输入和输出仍是一份 P1/P2 时间对齐的 joint-state DataFrame，
 但 06c 不生成具有旧 GA 语义的 weight 字段。
@@ -66,6 +68,8 @@ class ContextStrategyPosteriorConfig:
     beta_grid_size: int = 81
     cv_folds: int = 5
     posterior_threshold: float = 0.70
+    min_information_coverage: float = 0.50
+    information_epsilon: float = 1e-12
     random_seed: int = 20260610
 
 
@@ -88,12 +92,40 @@ class ContextObservation:
     action_indices: np.ndarray
     q_values: np.ndarray
     null_log_likelihood: float
+    strategy_information_coverage: np.ndarray | None = None
+    strategy_eligible: np.ndarray | None = None
 
     @property
     def valid_action_count(self) -> int:
         """返回当前 context 中实际进入 likelihood 的动作数量。"""
 
         return int(self.action_indices.size)
+
+    def resolved_information_coverage(self) -> np.ndarray:
+        """返回当前 context 每个策略具有方向信息的有效动作比例。
+
+        输入语义：正式流程会在构造 observation 时保存 coverage；测试或外部调用若未
+        显式提供，则按归一化 Q 中合法方向是否存在差异即时计算。
+        输出语义：返回长度等于策略数、范围位于 ``[0, 1]`` 的数组。
+        关键约束：无有效动作时 coverage 全为 0；非法方向 ``-inf`` 不参与比较。
+        """
+
+        if self.strategy_information_coverage is not None:
+            return np.asarray(self.strategy_information_coverage, dtype=float)
+        return calculate_strategy_information_coverage(self.q_values)
+
+    def resolved_strategy_eligible(self) -> np.ndarray:
+        """返回当前 context 中允许进入 posterior 的策略布尔掩码。
+
+        输入语义：正式流程按配置阈值预先保存 eligibility；未保存时使用默认 0.5
+        coverage 阈值，保证手工构造 observation 仍遵循正式统计语义。
+        输出语义：返回长度等于策略数的 bool 数组。
+        关键约束：Null 模型不在该数组中，它始终作为独立候选参与比较。
+        """
+
+        if self.strategy_eligible is not None:
+            return np.asarray(self.strategy_eligible, dtype=bool)
+        return self.resolved_information_coverage() >= 0.50
 
 
 @dataclass(frozen=True)
@@ -124,6 +156,7 @@ class ObservationBatch:
     action_indices: np.ndarray
     context_starts: np.ndarray
     context_count: int
+    strategy_eligible: np.ndarray
 
 
 @dataclass
@@ -157,6 +190,10 @@ def validate_config(config: ContextStrategyPosteriorConfig) -> None:
         raise ValueError("cv_folds 至少为 2；trial 不足时流程会自动跳过或减少折数。")
     if not 0 <= config.posterior_threshold <= 1:
         raise ValueError("posterior_threshold 必须位于 [0, 1]。")
+    if not 0 <= config.min_information_coverage <= 1:
+        raise ValueError("min_information_coverage 必须位于 [0, 1]。")
+    if config.information_epsilon < 0:
+        raise ValueError("information_epsilon 不能小于 0。")
     if config.bean_event_suppression_window < 0:
         raise ValueError("bean_event_suppression_window 不能小于 0。")
     if config.ghost_stay_suppression_window < 0:
@@ -225,6 +262,33 @@ def normalize_legal_q(values: Any) -> np.ndarray:
     else:
         result[legal_mask] = (legal_values - minimum) / (maximum - minimum)
     return result
+
+
+def calculate_strategy_information_coverage(
+    q_values: np.ndarray,
+    epsilon: float = 1e-12,
+) -> np.ndarray:
+    """计算一个 context 中各策略的方向信息覆盖率。
+
+    输入语义：``q_values`` 形状为 ``有效动作数 × 策略数 × 4``，每个 Q 已完成合法
+    方向 Min-Max；epsilon 用于忽略浮点噪声。
+    输出语义：返回每个策略在多少比例的有效动作行上能区分至少两个合法方向。
+    关键约束：合法方向全部相等表示策略在该行无信息；该行继续保留在 coverage 分母
+    中，因此无信息等价于诊断准确率中的一次未命中，而不是被静默删除。
+    """
+
+    values = np.asarray(q_values, dtype=float)
+    if values.ndim != 3 or values.shape[2] != len(DIRECTION_NAMES):
+        raise ValueError(f"context Q 必须为 n×k×4，实际 shape={values.shape}")
+    strategy_count = values.shape[1]
+    if values.shape[0] == 0:
+        return np.zeros(strategy_count, dtype=float)
+
+    finite_mask = np.isfinite(values)
+    finite_min = np.min(np.where(finite_mask, values, np.inf), axis=2)
+    finite_max = np.max(np.where(finite_mask, values, -np.inf), axis=2)
+    informative = (finite_max - finite_min) > float(epsilon)
+    return np.mean(informative, axis=0, dtype=float)
 
 
 def prepare_player_view(
@@ -314,6 +378,11 @@ def build_context_observation(
         q_values = np.stack(q_rows, axis=0)
     else:
         q_values = np.empty((0, len(config.agents), len(DIRECTION_NAMES)), dtype=float)
+    information_coverage = calculate_strategy_information_coverage(
+        q_values,
+        epsilon=config.information_epsilon,
+    )
+    strategy_eligible = information_coverage >= config.min_information_coverage
     trial_name = str(view.at[start, "DayTrial"])
     return ContextObservation(
         player=player,
@@ -324,6 +393,8 @@ def build_context_observation(
         action_indices=np.asarray(actions, dtype=int),
         q_values=q_values,
         null_log_likelihood=float(null_log_likelihood),
+        strategy_information_coverage=information_coverage,
+        strategy_eligible=strategy_eligible,
     )
 
 
@@ -408,18 +479,46 @@ def context_strategy_log_likelihood(observation: ContextObservation, beta: float
     return np.sum(true_scores - log_denominator, axis=0)
 
 
-def context_marginal_nll(observation: ContextObservation, beta: float) -> float:
-    """计算潜在策略边际化后的单 context 负对数似然。
+def context_eligible_strategy_log_likelihood(
+    observation: ContextObservation,
+    beta: float,
+) -> np.ndarray:
+    """构造信息覆盖率门控后的行为策略 likelihood。
 
-    输入语义：observation 必须至少包含一个有效动作。
-    输出语义：返回均匀策略先验下的标量 NLL。
-    关键约束：七种策略是 context 的互斥潜在解释，不把 posterior 当作可加权 utility。
+    输入语义：observation 至少包含一个有效动作，beta 为文件级 temperature。
+    输出语义：返回长度等于策略数的数组；coverage 不足的策略被写为 ``-inf``。
+    关键约束：Null 不进入该数组，也不参与 beta/posterior；这里的 ``-inf`` 是 context
+    级候选排除，不是把某一无信息动作的概率强行设为 0。
     """
 
-    log_likelihood = context_strategy_log_likelihood(observation, beta)
-    if np.any(np.isnan(log_likelihood)):
+    strategy_log_likelihood = context_strategy_log_likelihood(observation, beta)
+    eligible = observation.resolved_strategy_eligible()
+    if eligible.shape != strategy_log_likelihood.shape:
+        raise ValueError(
+            "strategy eligibility 与 likelihood 长度不一致："
+            f"{eligible.shape} != {strategy_log_likelihood.shape}"
+        )
+    gated = strategy_log_likelihood.copy()
+    gated[~eligible] = -np.inf
+    return gated
+
+
+def context_marginal_nll(observation: ContextObservation, beta: float) -> float:
+    """计算覆盖率合格策略边际化后的单 context 负对数似然。
+
+    输入语义：observation 必须至少包含一个有效动作。
+    输出语义：返回当前合格行为策略均匀先验下的标量 NLL。
+    关键约束：coverage 不足的策略不占候选先验质量；没有合格策略的 context 应在
+    上层被排除出 beta 拟合并标记 vague，不能调用本函数强行构造 NLL。
+    """
+
+    candidate_log_likelihood = context_eligible_strategy_log_likelihood(observation, beta)
+    if np.any(np.isnan(candidate_log_likelihood)):
         raise ValueError("无有效动作的 context 不能进入 beta loss。")
-    return float(-(logsumexp(log_likelihood) - math.log(log_likelihood.size)))
+    candidate_count = int(np.sum(np.isfinite(candidate_log_likelihood)))
+    if candidate_count == 0:
+        raise ValueError("没有覆盖率合格策略的 context 不能进入 beta loss。")
+    return float(-(logsumexp(candidate_log_likelihood) - math.log(candidate_count)))
 
 
 def total_context_nll(observations: Iterable[ContextObservation], beta: float) -> float:
@@ -430,7 +529,11 @@ def total_context_nll(observations: Iterable[ContextObservation], beta: float) -
     关键约束：无有效动作段直接跳过，不向 loss 添加任意常数。
     """
 
-    effective = [item for item in observations if item.valid_action_count > 0]
+    effective = [
+        item
+        for item in observations
+        if item.valid_action_count > 0 and bool(np.any(item.resolved_strategy_eligible()))
+    ]
     if not effective:
         return 0.0
     return batch_total_context_nll(build_observation_batch(effective), beta)
@@ -453,6 +556,10 @@ def build_observation_batch(observations: list[ContextObservation]) -> Observati
         action_indices=np.concatenate([item.action_indices for item in observations], axis=0),
         context_starts=starts,
         context_count=len(observations),
+        strategy_eligible=np.stack(
+            [item.resolved_strategy_eligible() for item in observations],
+            axis=0,
+        ),
     )
 
 
@@ -484,7 +591,20 @@ def batch_total_context_nll(batch: ObservationBatch, beta: float) -> float:
     )
     if context_log_likelihood.shape[0] != batch.context_count:
         raise RuntimeError("批量 context 聚合数量不一致。")
-    context_nll = -(logsumexp(context_log_likelihood, axis=1) - math.log(batch.q_values.shape[1]))
+    if batch.strategy_eligible.shape != context_log_likelihood.shape:
+        raise RuntimeError(
+            "批量 eligibility 与 context likelihood 形状不一致："
+            f"{batch.strategy_eligible.shape} != {context_log_likelihood.shape}"
+        )
+    candidate_log_likelihood = context_log_likelihood.copy()
+    candidate_log_likelihood[~batch.strategy_eligible] = -np.inf
+    candidate_count = np.sum(np.isfinite(candidate_log_likelihood), axis=1)
+    if np.any(candidate_count == 0):
+        raise RuntimeError("ObservationBatch 包含没有覆盖率合格策略的 context。")
+    context_nll = -(
+        logsumexp(candidate_log_likelihood, axis=1)
+        - np.log(candidate_count)
+    )
     return float(np.sum(context_nll))
 
 
@@ -499,7 +619,11 @@ def fit_beta(
     关键约束：先做全区间网格可避免直接假定混合模型 loss 单峰，再只在最佳邻域精修。
     """
 
-    effective = [item for item in observations if item.valid_action_count > 0]
+    effective = [
+        item
+        for item in observations
+        if item.valid_action_count > 0 and bool(np.any(item.resolved_strategy_eligible()))
+    ]
     if not effective:
         raise ValueError("没有有效 context，无法拟合 beta。")
     batch = build_observation_batch(effective)
@@ -556,7 +680,13 @@ def build_grouped_folds(
     关键约束：不随机拆分 context 或 tile，避免相邻行为泄漏到验证集。
     """
 
-    trial_names = sorted({item.trial_name for item in observations if item.valid_action_count > 0})
+    trial_names = sorted(
+        {
+            item.trial_name
+            for item in observations
+            if item.valid_action_count > 0 and bool(np.any(item.resolved_strategy_eligible()))
+        }
+    )
     actual_folds = min(fold_count, len(trial_names))
     if actual_folds < 2:
         return {}
@@ -577,7 +707,11 @@ def fit_full_beta_models(
     """
 
     effective_by_player = {
-        player: [item for item in observations if item.valid_action_count > 0]
+        player: [
+            item
+            for item in observations
+            if item.valid_action_count > 0 and bool(np.any(item.resolved_strategy_eligible()))
+        ]
         for player, observations in observations_by_player.items()
     }
     all_effective = [item for observations in effective_by_player.values() for item in observations]
@@ -650,7 +784,9 @@ def run_grouped_cross_validation(
             player: [
                 item
                 for item in observations
-                if item.valid_action_count > 0 and trial_to_fold[item.trial_name] != fold_id
+                if item.valid_action_count > 0
+                and bool(np.any(item.resolved_strategy_eligible()))
+                and trial_to_fold[item.trial_name] != fold_id
             ]
             for player, observations in observations_by_player.items()
         }
@@ -658,7 +794,9 @@ def run_grouped_cross_validation(
             player: [
                 item
                 for item in observations
-                if item.valid_action_count > 0 and trial_to_fold[item.trial_name] == fold_id
+                if item.valid_action_count > 0
+                and bool(np.any(item.resolved_strategy_eligible()))
+                and trial_to_fold[item.trial_name] == fold_id
             ]
             for player, observations in observations_by_player.items()
         }
@@ -706,16 +844,22 @@ def run_grouped_cross_validation(
 
 
 def posterior_from_log_likelihood(log_likelihood: np.ndarray) -> np.ndarray:
-    """把均匀策略先验下的 log-likelihood 转换为 posterior。
+    """把均匀候选先验下的 log-likelihood 转换为 posterior。
 
-    输入语义：log_likelihood 是长度为策略数的有限数组。
+    输入语义：log_likelihood 是一维数组；被 coverage 门控排除的候选允许为 ``-inf``。
     输出语义：返回总和为 1 的 posterior 数组。
-    关键约束：使用 logsumexp 保证长 context 下不会因概率连乘发生下溢。
+    关键约束：至少一个候选必须有限，且不允许 NaN/+inf；使用 logsumexp 避免下溢。
     """
 
     values = np.asarray(log_likelihood, dtype=float)
-    if values.ndim != 1 or values.size == 0 or not np.all(np.isfinite(values)):
-        raise ValueError(f"策略 log-likelihood 必须是一维有限数组：{values}")
+    if (
+        values.ndim != 1
+        or values.size == 0
+        or np.any(np.isnan(values))
+        or np.any(np.isposinf(values))
+        or not np.any(np.isfinite(values))
+    ):
+        raise ValueError(f"候选 log-likelihood 必须是一维且至少有一个有限值：{values}")
     return np.exp(values - logsumexp(values))
 
 
@@ -735,6 +879,8 @@ def initialize_player_output(index: pd.Index, player: str) -> pd.DataFrame:
         "best_global_cluster_meta",
         "trial_context",
         "strategy_log_likelihood",
+        "strategy_information_coverage",
+        "strategy_eligible",
         "strategy_posterior",
         "strategy_posterior_max",
         "strategy_candidate",
@@ -783,6 +929,8 @@ def write_player_posterior(
 
         if observation.valid_action_count == 0:
             log_likelihood = [float("nan")] * len(config.agents)
+            information_coverage = [float("nan")] * len(config.agents)
+            strategy_eligible = [False] * len(config.agents)
             posterior = [float("nan")] * len(config.agents)
             posterior_max = float("nan")
             candidate = "stay"
@@ -792,22 +940,39 @@ def write_player_posterior(
             gain = float("nan")
         else:
             log_likelihood_array = context_strategy_log_likelihood(observation, beta)
-            posterior_array = posterior_from_log_likelihood(log_likelihood_array)
-            candidate_index = int(np.argmax(posterior_array))
-            candidate = config.agents[candidate_index]
-            posterior_max = float(posterior_array[candidate_index])
-            is_vague = posterior_max < config.posterior_threshold
-            strategy_name = "vague" if is_vague else candidate
+            candidate_log_likelihood = context_eligible_strategy_log_likelihood(observation, beta)
+            eligible = observation.resolved_strategy_eligible()
+            if bool(np.any(eligible)):
+                posterior_array = posterior_from_log_likelihood(candidate_log_likelihood)
+                candidate_index = int(np.argmax(posterior_array))
+                candidate = config.agents[candidate_index]
+                posterior_max = float(posterior_array[candidate_index])
+                is_vague = posterior_max < config.posterior_threshold
+                strategy_name = "vague" if is_vague else candidate
+            else:
+                # Context 有动作但所有策略都缺乏足够信息时，不强行从七策略中选择。
+                posterior_array = np.zeros(len(config.agents), dtype=float)
+                candidate = "none"
+                posterior_max = 0.0
+                is_vague = True
+                strategy_name = "vague"
             log_likelihood = log_likelihood_array.tolist()
+            information_coverage = observation.resolved_information_coverage().tolist()
+            strategy_eligible = eligible.tolist()
             posterior = posterior_array.tolist()
             null_likelihood = observation.null_log_likelihood
-            gain = float(
-                (float(np.max(log_likelihood_array)) - null_likelihood) / observation.valid_action_count
+            eligible_log_likelihood = log_likelihood_array[observation.resolved_strategy_eligible()]
+            gain = (
+                float((float(np.max(eligible_log_likelihood)) - null_likelihood) / observation.valid_action_count)
+                if eligible_log_likelihood.size
+                else float("nan")
             )
 
         repeated_values: dict[str, Any] = {
             "trial_context": observation.context,
             "strategy_log_likelihood": log_likelihood,
+            "strategy_information_coverage": information_coverage,
+            "strategy_eligible": strategy_eligible,
             "strategy_posterior": posterior,
             "strategy_posterior_max": posterior_max,
             "strategy_candidate": candidate,
@@ -882,14 +1047,18 @@ def fit_context_strategy_posterior_dataframe(
     # CV 信息。global_selection_uses_context_actions 显式提醒后续分析其乐观偏差来源。
     result.attrs = copy.deepcopy(raw_data.attrs)
     result.attrs["context_strategy_posterior_model"] = {
-        "version": "06c-v1",
+        "version": "06c-v3",
         "strategy_order": list(config.agents),
         "strategy_number": {name: STRATEGY_NUMBER[name] for name in config.agents},
         "normalization": "per_player_tile_strategy_legal_direction_minmax_from_raw_q",
         "bean_event_suppression_window": config.bean_event_suppression_window,
         "ghost_stay_suppression_window": config.ghost_stay_suppression_window,
-        "strategy_prior": "uniform",
+        "strategy_prior": "uniform_over_coverage_eligible_behavior_strategies",
         "posterior_threshold": config.posterior_threshold,
+        "min_information_coverage": config.min_information_coverage,
+        "information_epsilon": config.information_epsilon,
+        "null_model": "uniform_over_legal_actions_diagnostic_only",
+        "null_participates_in_beta_or_posterior": False,
         "global_selection_rule": "06b_context_probability_accuracy",
         "global_selection_uses_context_actions": True,
         "selected_beta_model": full_model["selected_model"],
@@ -934,6 +1103,8 @@ def process_context_strategy_posterior_file(
         beta_grid_size=base_config.beta_grid_size,
         cv_folds=base_config.cv_folds,
         posterior_threshold=base_config.posterior_threshold,
+        min_information_coverage=base_config.min_information_coverage,
+        information_epsilon=base_config.information_epsilon,
         random_seed=base_config.random_seed + file_index,
     )
     input_file = Path(input_path)

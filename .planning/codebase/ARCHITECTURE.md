@@ -1,6 +1,10 @@
 <!-- refreshed: 2026-06-22 -->
 # Architecture
 
+> 历史快照：本文记录 2026-06-22 的代码库状态，未包含后续 05 cluster-global、
+> 06b/06c、07c 和 04 异步切换压缩改动。当前流程与默认目录请以根目录
+> `README.md`、`data/README.md` 和 `docs/data_flow.html` 为准。
+
 **Analysis Date:** 2026-06-22
 
 ## System Overview

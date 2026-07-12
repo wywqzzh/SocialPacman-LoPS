@@ -1,5 +1,8 @@
 # Coding Conventions
 
+> 历史快照：本文基于 2026-06-22 的文件结构整理。通用命名约定仍可参考，但其中的
+> 脚本清单和示例不覆盖后续 05b/06b/06c/07c；当前协作约束以 `AGENTS.md` 为准。
+
 **Analysis Date:** 2026-06-22
 
 ## Naming Patterns

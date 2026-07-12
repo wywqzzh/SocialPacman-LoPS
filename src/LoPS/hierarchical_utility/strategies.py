@@ -78,6 +78,8 @@ class SharedPathUtilityEngine:
         self.compiled_map = compiled_map
         self.frame_state = frame_state
         self.config = config
+        if not 0.0 < config.local_discount_factor <= 1.0:
+            raise ValueError("local_discount_factor 必须满足 0 < gamma <= 1。")
         self.reward_amount = compiled_map.reward_amount
         self.neighbor_ids = compiled_map.neighbor_ids
         self.strategy_depths = (
@@ -100,13 +102,20 @@ class SharedPathUtilityEngine:
             [[0.0, 0.0] for _ in DIRECTIONS]
             for _ in PATH_Q_COLUMNS
         ]
+        # Local 表达玩家在固定局部范围内选择一条最佳取食路线，因此需要额外保存
+        # 每个首方向的最大叶路径奖励。其余策略继续使用叶路径均值，不受该改动影响。
+        self.leaf_max_utility: list[list[float]] = [
+            [-np.inf for _ in DIRECTIONS]
+            for _ in PATH_Q_COLUMNS
+        ]
 
     def estimate(self, *, return_trace: bool = False) -> dict[str, np.ndarray] | tuple[dict[str, np.ndarray], dict[str, Any]]:
         """估计本帧所有路径型策略的 Q 值。
 
         输入语义：return_trace 控制是否返回每个策略、每个初始方向的叶节点统计。
         输出语义：默认返回 Q 列名到四方向 Q 向量的字典；trace 模式额外返回 leaf 统计。
-        关键约束：Q 聚合使用叶节点 utility 平均值，方向顺序固定为 left/right/up/down。
+        关键约束：Local 聚合最大叶路径 utility，其余策略聚合叶路径均值；方向顺序
+        固定为 left/right/up/down。
         """
 
         self._construct_shared_tree()
@@ -167,6 +176,7 @@ class SharedPathUtilityEngine:
                     state,
                     next_position_id,
                     visited_before,
+                    child_depth,
                 )
                 if terminated or child_depth >= self.strategy_depths[strategy_index]:
                     self._add_leaf(strategy_index, root_direction_id, next_state.utility)
@@ -227,12 +237,15 @@ class SharedPathUtilityEngine:
         state: StrategyState,
         next_position_id: int,
         visited_before: bool,
+        child_depth: int,
     ) -> tuple[StrategyState, bool]:
         """计算某个策略走到下一位置后的状态和终止标记。
 
-        输入语义：strategy_index 指定策略，state 是父节点状态，next_position_id 是下一位置。
+        输入语义：strategy_index 指定策略，state 是父节点状态，next_position_id 是下一
+        位置，child_depth 是该位置相对搜索根节点的步数。
         输出语义：返回子节点状态，以及该策略是否在子节点成为叶节点。
-        关键约束：reward 更新和 risk 更新的先后关系按策略规则显式表达。
+        关键约束：只有 Local 的资源奖励按 ``gamma**(child_depth-1)`` 衰减；其它策略
+        保持原奖励语义。reward 更新和 risk 更新顺序按策略规则显式表达。
         """
 
         if strategy_index == LOCAL_INDEX:
@@ -243,7 +256,9 @@ class SharedPathUtilityEngine:
             _, exact_risk, terminated = self._two_ghost_risk(state.ghost_status, next_position_id, visited_before)
             return (
                 StrategyState(
-                    state.utility + exact_reward + 0.0 * exact_risk,
+                    state.utility
+                    + (self.config.local_discount_factor ** (child_depth - 1)) * exact_reward
+                    + 0.0 * exact_risk,
                     bean_mask,
                     energizer_mask,
                     ghost_status,
@@ -502,19 +517,25 @@ class SharedPathUtilityEngine:
         """把一个策略叶节点计入对应初始方向统计。
 
         输入语义：strategy_index 指定策略，root_direction_id 指定第一步方向，utility 是路径累计值。
-        输出语义：self.leaf_stats 中 utility sum 和 leaf count 增加。
+        输出语义：self.leaf_stats 中 utility sum/count 增加，self.leaf_max_utility 同步
+        保存该策略和首方向目前见到的最大累计值。
         关键约束：root_direction_id 必须来自四方向之一，根节点本身不会被计为叶节点。
         """
 
         self.leaf_stats[strategy_index][root_direction_id][0] += utility
         self.leaf_stats[strategy_index][root_direction_id][1] += 1
+        self.leaf_max_utility[strategy_index][root_direction_id] = max(
+            self.leaf_max_utility[strategy_index][root_direction_id],
+            utility,
+        )
 
     def _build_q_values(self) -> dict[str, np.ndarray]:
         """根据叶节点统计生成路径型策略 Q 向量。
 
         输入语义：self.leaf_stats 已经在共享路径搜索中填充。
         输出语义：返回 Q 列名到四方向 Q 向量的映射。
-        关键约束：无叶节点的方向保持 0；路径型策略 Q 使用 float64。
+        关键约束：Local 使用同一首方向下的最大叶路径奖励，表示玩家会选择最佳局部
+        取食路线；其余路径策略保持叶路径均值。无叶节点方向保持 0，Q 使用 float64。
         """
 
         q_values: dict[str, np.ndarray] = {}
@@ -523,7 +544,10 @@ class SharedPathUtilityEngine:
             available_indices: list[int] = []
             for direction_id, (utility_sum, leaf_count) in enumerate(self.leaf_stats[strategy_index]):
                 if leaf_count > 0:
-                    q_list[direction_id] = utility_sum / leaf_count
+                    if strategy_index == LOCAL_INDEX:
+                        q_list[direction_id] = self.leaf_max_utility[strategy_index][direction_id]
+                    else:
+                        q_list[direction_id] = utility_sum / leaf_count
                     available_indices.append(direction_id)
             q_array = np.array(q_list)
             q_values[column] = _apply_randomness_and_laziness(
@@ -539,7 +563,7 @@ class SharedPathUtilityEngine:
         """生成过程一致性验证需要的 leaf 统计。
 
         输入语义：q_values 是已计算好的策略 Q 值。
-        输出语义：返回每个路径型策略的 leaf count、utility sum 和 Q 值。
+        输出语义：返回每个路径型策略的 leaf count、utility sum、utility max 和 Q 值。
         关键约束：该结构只用于验证，不参与正式输出。
         """
 
@@ -552,6 +576,7 @@ class SharedPathUtilityEngine:
                     direction_stats[direction] = {
                         "utility_sum": float(utility_sum),
                         "leaf_count": int(leaf_count),
+                        "utility_max": float(self.leaf_max_utility[strategy_index][direction_id]),
                     }
             trace[column] = {
                 "leaf_stats": direction_stats,

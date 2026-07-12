@@ -14,6 +14,8 @@ from LoPS.context_strategy_posterior import (
     batch_total_context_nll,
     build_observation_batch,
     build_grouped_folds,
+    calculate_strategy_information_coverage,
+    context_eligible_strategy_log_likelihood,
     context_marginal_nll,
     context_strategy_log_likelihood,
     fit_full_beta_models,
@@ -47,7 +49,7 @@ class ContextStrategyPosteriorTests(unittest.TestCase):
         suppressed = suppress_bean_boundaries_near_events(
             bean_start_points={2, 11},
             bean_end_points={5, 15},
-            event_boundaries={0, 8, 20},
+            directional_event_boundaries={0, 8, 20},
             window=3,
         )
         # 开始点 2/11 分别紧随强事件 0/8，结束点 5 紧邻其后的强事件 8；结束点 15
@@ -62,11 +64,26 @@ class ContextStrategyPosteriorTests(unittest.TestCase):
         suppressed = suppress_bean_boundaries_near_events(
             bean_start_points={62},
             bean_end_points={65},
-            event_boundaries={65},
+            directional_event_boundaries={65},
             window=3,
         )
         self.assertEqual(suppressed, {65})
         self.assertNotIn(62, suppressed)
+
+    def test_behavioral_strong_event_suppresses_all_nearby_bean_boundaries(self) -> None:
+        """验证行为强事件会对称删除前后窗口内任意类型的普通豆边界。"""
+
+        suppressed = suppress_bean_boundaries_near_events(
+            bean_start_points={7, 9, 13, 14},
+            bean_end_points={6, 8, 11, 14},
+            directional_event_boundaries={0, 20},
+            symmetric_event_boundaries={10},
+            window=3,
+        )
+
+        # 强事件 10 前后的开始点 7/9/13 和结束点 8/11 都会删除；距离为 4 的
+        # 结束点 6 及开始/结束点 14 则保留。该规则不受边界类型和事件方向限制。
+        self.assertEqual(suppressed, {7, 8, 9, 11, 13})
 
     def test_hard_boundaries_use_event_rows_instead_of_previous_actions(self) -> None:
         """验证 energizer 只在事件行切段，邻近 bean 首尾事件按规则删除。"""
@@ -219,6 +236,61 @@ class ContextStrategyPosteriorTests(unittest.TestCase):
         posterior = posterior_from_log_likelihood(actual)
         self.assertAlmostEqual(float(np.sum(posterior)), 1.0)
         self.assertGreater(posterior[0], posterior[1])
+
+    def test_low_information_strategy_is_gated_without_null_competition(self) -> None:
+        """验证少数命中不能让大部分时间无信息的策略获得虚高 posterior。
+
+        输入语义：构造19个有效动作，Global 每行都有方向信息，Local 仅最后6行能够
+        区分方向，复现真实 P2 80--99 context 的 6/19 coverage 结构。
+        输出语义：Local coverage 低于0.5并被排除；候选数组中 Local 为负无穷，Global
+        是唯一合格行为策略，因此整个 context 的 posterior 只归属于 Global。
+        关键约束：无信息行仍在 coverage 分母中，不能只按6个有信息动作计算100%。
+        """
+
+        action_count = 19
+        global_q = np.repeat(
+            np.asarray([[1.0, 0.0, -np.inf, -np.inf]]),
+            action_count,
+            axis=0,
+        )
+        local_q = np.repeat(
+            np.asarray([[0.0, 0.0, -np.inf, -np.inf]]),
+            action_count,
+            axis=0,
+        )
+        local_q[-6:, 0] = 1.0
+        q_values = np.stack((global_q, local_q), axis=1)
+        coverage = calculate_strategy_information_coverage(q_values)
+        eligible = coverage >= 0.50
+        observation = ContextObservation(
+            player="p2",
+            trial_name="01-01-test",
+            context=(0, action_count),
+            is_stay=False,
+            row_indices=np.arange(action_count),
+            action_indices=np.zeros(action_count, dtype=int),
+            q_values=q_values,
+            null_log_likelihood=-action_count * math.log(2),
+            strategy_information_coverage=coverage,
+            strategy_eligible=eligible,
+        )
+
+        np.testing.assert_allclose(coverage, [1.0, 6.0 / 19.0])
+        np.testing.assert_array_equal(eligible, [True, False])
+        candidates = context_eligible_strategy_log_likelihood(observation, beta=2.0)
+        self.assertTrue(np.isfinite(candidates[0]))
+        self.assertTrue(np.isneginf(candidates[1]))
+        posterior = posterior_from_log_likelihood(candidates)
+        np.testing.assert_allclose(posterior, [1.0, 0.0])
+        self.assertTrue(np.isfinite(context_marginal_nll(observation, beta=2.0)))
+
+    def test_posterior_accepts_ineligible_negative_infinity_candidate(self) -> None:
+        """验证 posterior 将被门控候选置0，同时保留其余候选归一化。"""
+
+        posterior = posterior_from_log_likelihood(np.asarray([-2.0, -np.inf, -1.0]))
+        self.assertEqual(float(posterior[1]), 0.0)
+        self.assertAlmostEqual(float(np.sum(posterior)), 1.0)
+        self.assertGreater(posterior[2], posterior[0])
 
     def test_vectorized_batch_loss_matches_context_loop(self) -> None:
         """验证批量优化只加速实现，不改变逐 context NLL。"""

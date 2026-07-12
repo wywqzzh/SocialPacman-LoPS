@@ -1,5 +1,9 @@
 # External Integrations
 
+> 历史快照：本文的文件数量、数据目录和入口关系停留在 2026-06-22。当前数据分支、
+> 可选依赖和视频入口请以 `README.md`、`data/README.md` 与
+> `docs/data_flow.html` 为准。
+
 **Analysis Date:** 2026-06-22
 
 ## APIs & External Services

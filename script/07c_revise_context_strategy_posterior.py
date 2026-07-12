@@ -85,6 +85,9 @@ def discover_posterior_players(data: pd.DataFrame) -> list[str]:
             f"{player}_action_dir",
             f"{player}_available_dir",
             f"{player}_strategy_posterior",
+            f"{player}_strategy_candidate",
+            f"{player}_strategy_information_coverage",
+            f"{player}_strategy_eligible",
             f"{player}_trial_context",
             f"{player}_is_stay",
             f"{player}_is_vague",
@@ -107,7 +110,8 @@ def parse_posterior_score(value: Any, strategy_count: int) -> list[float]:
 
     输入语义：value 通常是长度为 7 的 list；stay 行可能保存全 NaN。
     输出语义：有效 posterior 原样返回；全 NaN 返回全零，供 is_stay 优先级处理。
-    关键约束：部分 NaN 或长度错误视为数据损坏，不能静默补齐。
+    关键约束：06c-v3 的 posterior 已只在 coverage 合格的行为策略间归一化；部分
+    NaN 或长度错误视为数据损坏，不能静默补齐。
     """
 
     values = np.asarray(value, dtype=float).reshape(-1)
@@ -245,9 +249,9 @@ def revise_context_strategy_posterior_dataframe(
 
     result.attrs = copy.deepcopy(data.attrs)
     result.attrs["context_strategy_posterior_revision"] = {
-        "version": "07c-v4",
-        "source": "06c_context_strategy_posterior",
-        "initial_strategy_score": "strategy_posterior",
+        "version": "07c-v6",
+        "source": "06c_context_strategy_posterior_v3",
+        "initial_strategy_score": "coverage_gated_strategy_posterior",
         "q_normalization": "per_player_tile_strategy_legal_direction_minmax_from_raw_q",
         "global_q_source": "selected_global_Q",
         # 显式记录 Approach 修正规则状态，保证仅查看输出文件 attrs 也能还原本次流程。

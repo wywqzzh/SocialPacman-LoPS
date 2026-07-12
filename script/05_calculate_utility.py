@@ -56,12 +56,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--randomness-coeff", type=float, default=0.0, help="Q 随机扰动系数。")
     parser.add_argument("--laziness-coeff", type=float, default=0.0, help="沿用上一方向的惰性系数。")
     parser.add_argument("--global-depth", type=int, default=15, help="Global 策略深度参数。")
-    parser.add_argument("--global-ignore-depth", type=int, default=10, help="Global 远距离 bean 过滤深度。")
+    parser.add_argument(
+        "--global-ignore-depth",
+        type=int,
+        default=10,
+        help="旧 Global 区域搜索的近距离 bean 忽略深度；不限制 cluster Global。",
+    )
     parser.add_argument("--global-cluster-radius", type=int, default=60, help="Cluster Global 可考虑的最远资源团距离。")
     parser.add_argument("--global-cluster-distance-threshold", type=int, default=3, help="Cluster Global 中资源点聚类的地图距离阈值。")
     parser.add_argument("--local-depth", type=int, default=10, help="Local 路径树深度。")
-    parser.add_argument("--evade-depth", type=int, default=10, help="Evade 路径树深度。")
-    parser.add_argument("--approach-depth", type=int, default=10, help="Approach 路径树深度。")
+    parser.add_argument(
+        "--evade-depth",
+        type=int,
+        default=6,
+        help="Evade 路径树深度；默认只把 6 步内的正常 ghost 视为即时威胁。",
+    )
+    parser.add_argument(
+        "--approach-depth",
+        type=int,
+        default=20,
+        help="Approach 路径树深度；默认允许20步范围内的远程追鬼行为提供方向证据。",
+    )
     parser.add_argument("--energizer-depth", type=int, default=10, help="Energizer 路径树深度。")
     parser.add_argument("--no-energizer-depth", type=int, default=8, help="NoEnergizer 路径树深度。")
     parser.add_argument(

@@ -202,7 +202,7 @@ def bool_from_row_value(value: Any) -> bool:
 
 
 def strategy_name_from_saved_value(value: Any) -> str | None:
-    """把 07 写回的策略字段转换成视频显示使用的策略名。
+    """把 07/07c 写回的策略字段转换成视频显示使用的策略名。
 
     输入语义：value 通常来自 ``p1_strategy`` 或 ``p2_strategy``，可以是旧编号、
     numpy 数值、字符串策略名或空值。
@@ -234,20 +234,21 @@ def strategy_name_from_saved_value(value: Any) -> str | None:
 
 
 def estimate_player_strategy(row: pd.Series, player: str) -> str:
-    """根据单行 07 修正结果判断某个玩家当前显示策略。
+    """根据单行 07c、07 或 06c 结果判断某个玩家当前显示策略。
 
     输入语义：row 是视频当前帧对应的 07 corrected weight 行，player 是 ``p1`` 或 ``p2``。
     输出语义：返回 ``STRATEGY_AGENTS`` 中的策略名，或 ``stay``/``vague``。
-    关键约束：若 07 已写入 ``p1_strategy/p2_strategy``，优先使用该字段；它包含了
-    context 级 scared-majority approach 并列优先级。为了方便临时预览 06 数据，
-    若 07 strategy 字段不存在，再回退到 revised/original weight 的单行估计。
+    关键约束：优先使用 07c ``revised_strategy``，其次使用 07/06c ``strategy``；
+    只有这些标签均不存在时，才回退到 revised/original weight 的单行估计。
     """
 
-    strategy_column = f"{player}_strategy"
-    if strategy_column in row.index:
-        saved_strategy = strategy_name_from_saved_value(row[strategy_column])
-        if saved_strategy is not None:
-            return saved_strategy
+    # 07c 不覆盖 06c 原始策略，而是另存 revised_strategy；视频优先展示修正结果，
+    # 同时保留对旧 07 ``p1_strategy`` 和未修正 06c 的兼容。
+    for strategy_column in (f"{player}_revised_strategy", f"{player}_strategy"):
+        if strategy_column in row.index:
+            saved_strategy = strategy_name_from_saved_value(row[strategy_column])
+            if saved_strategy is not None:
+                return saved_strategy
 
     stay_column = f"{player}_is_stay"
     vague_column = f"{player}_revised_is_vague" if f"{player}_revised_is_vague" in row.index else f"{player}_is_vague"
@@ -398,17 +399,17 @@ def build_context_video_frame_lookup(game_rows: pd.DataFrame) -> dict[int, int]:
     """构造 row_id 到当前视频帧序号的查表。
 
     输入语义：game_rows 是同一个 DayTrial 的连续 tile 行，必须保留 04/05/06 阶段
-    写入的 ``row_id``；当前视频帧序号按绘制顺序从 1 开始。
+    写入的 ``row_id``；当前视频帧序号按绘制顺序从 0 开始。
     输出语义：返回 ``{row_id: video_frame_index}``。
-    关键约束：视频顶部的 ``video frame`` 也是 1-based，因此 context 也使用
-    同一套编号，避免把原始 frame_id 和视频帧序号混在一起。
+    关键约束：PNG 文件名、视频顶部编号和 context 区间统一使用 0-based 编号，
+    避免同一张图片在文件名与画面内出现相差 1 的编号。
     """
 
     if "row_id" not in game_rows.columns:
         return {}
     return {
-        int(row["row_id"]): int(index) + 1
-        for index, row in game_rows.iterrows()
+        int(row["row_id"]): int(video_frame_index)
+        for video_frame_index, (_, row) in enumerate(game_rows.iterrows())
         if not pd.isna(row["row_id"])
     }
 
@@ -422,8 +423,8 @@ def format_player_context_video_frames(
 
     输入语义：row 是当前视频帧对应的 tile 行，player 是 ``p1`` 或 ``p2``，
     context_video_frame_lookup 用于把 context row_id 转成当前视频帧序号。
-    输出语义：返回类似 ``P1 ctx [38,43]`` 的短文本，左右端都是当前视频中的
-    1-based 帧号，且是闭区间。
+    输出语义：返回类似 ``P1 ctx [37,42]`` 的短文本，左右端都是当前视频中的
+    0-based 帧号，且是闭区间。
     关键约束：06 阶段的 context 本身是 row_id 右开区间 ``[start, end)``；
     视频显示时需要转换为闭区间 ``[start_video_frame, last_video_frame]``，
     即右端显示为 context 内最后一条实际渲染行，而不是右开边界对应的下一行。
@@ -447,6 +448,24 @@ def format_player_context_video_frames(
     if not included_video_frames:
         return f"{label} ctx rows [{start_row_id},{end_row_id})"
     return f"{label} ctx [{min(included_video_frames)},{max(included_video_frames)}]"
+
+
+def format_video_frame_counter(tile_index: int, total_tiles: int) -> str:
+    """生成统一的 0-based 当前帧/末帧显示文本。
+
+    输入语义：tile_index 是当前 0-based 帧号，total_tiles 是视频总帧数。
+    输出语义：返回类似 ``video frame 29/222`` 的文本，分母是最后一帧编号。
+    关键约束：当前帧必须落在 ``[0, total_tiles)``；总帧数不是显示编号，需减 1
+    后再作为末帧编号，确保第一帧和最后一帧分别显示为 ``0`` 和 ``N-1``。
+    """
+
+    if total_tiles <= 0:
+        raise TileVideoRenderError("视频总帧数必须大于 0。")
+    if tile_index < 0 or tile_index >= total_tiles:
+        raise TileVideoRenderError(
+            f"当前视频帧超出 0-based 范围：tile_index={tile_index}, total_tiles={total_tiles}"
+        )
+    return f"video frame {tile_index}/{total_tiles - 1}"
 
 
 def draw_strategy_bar(
@@ -946,7 +965,7 @@ def render_tile_frame(
         header_line_gap = max(24, int(active_metadata["cell_size"] * 0.82))
     draw = ImageDraw.Draw(frame)
     header_line_1 = (
-        f"video frame {tile_index + 1}/{total_tiles}  "
+        f"{format_video_frame_counter(tile_index, total_tiles)}  "
         f"raw frame_id {int(row['frame_id'])}  {row['DayTrial']}"
     )
     header_line_2 = "  |  ".join(
@@ -1093,7 +1112,7 @@ def choose_tile_file(tile_root: Path, task: str, session: str | None) -> Path:
 
 
 def load_game_rows(tile_path: Path, trial: str | None, max_tiles: int | None) -> pd.DataFrame:
-    """读取一个 07 corrected weight 文件中的某个 game。
+    """读取一个 07c/07 策略文件中的某个 game。
 
     输入语义：tile_path 指向 07 revise_human_weight 输出 pkl；trial 是可选 DayTrial。
     输出语义：返回按原顺序排列的单个 game 行。
@@ -1102,18 +1121,19 @@ def load_game_rows(tile_path: Path, trial: str | None, max_tiles: int | None) ->
 
     data = pd.read_pickle(tile_path)
     required_position_columns = ("p1_pos", "p1_alive", "ghost1Pos", "ghost2Pos")
-    required_strategy_columns = (
-        "p1_revised_normalized_weight",
-        "p1_is_stay",
-        "p1_revised_is_vague",
-        "p2_revised_normalized_weight",
-        "p2_is_stay",
-        "p2_revised_is_vague",
-    )
-    required_columns = (*required_position_columns, *ITEM_COLUMNS, *required_strategy_columns)
+    required_columns = (*required_position_columns, *ITEM_COLUMNS)
     missing = [column for column in required_columns if column not in data.columns]
     if missing:
         raise TileVideoRenderError(f"{tile_path} 缺少 06 视频绘制所需字段：{missing}")
+    for player in ("p1", "p2"):
+        strategy_sources = {
+            f"{player}_revised_strategy",
+            f"{player}_strategy",
+            f"{player}_revised_normalized_weight",
+            f"{player}_normalized_weight",
+        }
+        if strategy_sources.isdisjoint(data.columns):
+            raise TileVideoRenderError(f"{tile_path} 缺少 {player} 可用策略字段。")
     if "DayTrial" not in data.columns or "frame_id" not in data.columns:
         raise TileVideoRenderError(f"{tile_path} 缺少 DayTrial 或 frame_id 字段。")
 
@@ -1178,8 +1198,9 @@ def save_frame_images(frames: list[np.ndarray], output_dir: Path) -> None:
     """把视频帧逐张保存为 PNG 图片。
 
     输入语义：frames 是已经渲染好的 RGB numpy 帧列表；output_dir 是目标目录。
-    输出语义：写出 ``000000.png`` 形式的连续图片帧。
-    关键约束：保存前先清理同目录下旧 PNG，避免上一版较长视频残留多余帧。
+    输出语义：按 0-based 编号写出 ``000000.png`` 形式的连续图片帧。
+    关键约束：保存前先清理同目录下旧 PNG，避免上一版较长视频残留多余帧；
+    文件名中的整数必须与图片顶部的 ``video frame`` 整数完全一致。
     """
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1255,7 +1276,7 @@ def main() -> None:
     print(f"aa：{args.aa}")
     print(f"地图范围：x={metadata['x_min']}..{metadata['x_max']}, y={metadata['y_min']}..{metadata['y_max']}")
     print("角色图形：旧 renderer 静态 sprite")
-    print("策略显示：优先使用 07 strategy 字段，P1/P2 左右分离显示")
+    print("策略显示：优先使用 07c revised_strategy，其次使用 strategy，P1/P2 左右分离显示")
     print(f"输出视频：{output_path.resolve()}")
     if args.save_frames:
         print(f"输出图片帧：{frame_output_dir.resolve()}")

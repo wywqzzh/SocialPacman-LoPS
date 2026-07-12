@@ -25,7 +25,6 @@ from LoPS.dynamic_strategy_event_context import (
     process_dynamic_strategy_event_context_file,
 )
 from LoPS.dynamic_strategy_fitting import DEFAULT_AGENTS, DynamicStrategyFittingConfig
-from LoPS.hierarchical_utility import load_map_data
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,12 +39,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", type=Path, default=data_root / "05_cluster_global_utility_data")
     parser.add_argument("--output-dir", type=Path, default=data_root / "06_cluster_global_event_context_weight_data")
-    parser.add_argument(
-        "--constant-dir",
-        type=Path,
-        default=data_root / "constant_data",
-        help="包含 map_constants.pkl 的地图常量目录，用于计算 local 范围软边界。",
-    )
     parser.add_argument(
         "--single-file",
         type=Path,
@@ -64,10 +57,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--random-seed", type=int, default=20260610)
     parser.add_argument("--no-segment-seed", action="store_true", help="关闭每段派生随机种子。")
     parser.add_argument(
-        "--local-bean-distance-threshold",
+        "--bean-event-suppression-window",
         type=int,
-        default=10,
-        help="进入/离开最近普通豆最短路距离阈值的软边界，默认与 local_depth=10 对齐。",
+        default=3,
+        help="强事件前后取消普通豆起止边界的 tile 窗口，默认 3。",
+    )
+    parser.add_argument(
+        "--ghost-stay-suppression-window",
+        type=int,
+        default=5,
+        help="吃 ghost 事件前后取消长 stay 切段作用的 tile 窗口，默认 5。",
     )
     parser.add_argument("--min-effective-action-count", type=int, default=4, help="普通段落最少有效动作数，低于该值直接标为 vague。")
     parser.add_argument(
@@ -112,14 +111,11 @@ def main() -> None:
         random_seed=args.random_seed,
         segment_workers=args.segment_workers,
         use_segment_seed=not args.no_segment_seed,
-        local_bean_distance_threshold=args.local_bean_distance_threshold,
+        bean_event_suppression_window=args.bean_event_suppression_window,
+        ghost_stay_suppression_window=args.ghost_stay_suppression_window,
         min_effective_action_count=args.min_effective_action_count,
         min_effective_action_ratio=args.min_effective_action_ratio,
     )
-    # 地图距离表只用于 context 软边界；best cluster global 的候选 utility 已在 05
-    # 中逐行保存，06b 只在 context 级选择候选，不重新计算资源聚类。
-    map_data = load_map_data(args.constant_dir / "map_constants.pkl")
-
     if args.single_file is not None:
         input_file = resolve_single_file(args.input_dir, args.single_file)
         output_file = args.output_dir / input_file.relative_to(args.input_dir)
@@ -128,7 +124,6 @@ def main() -> None:
             output_file,
             config,
             file_index=0,
-            map_data=map_data,
         )
         print(summary)
         return
@@ -138,7 +133,6 @@ def main() -> None:
         args.output_dir,
         config,
         workers=args.workers,
-        map_data=map_data,
     )
     for summary in summaries:
         print(summary)

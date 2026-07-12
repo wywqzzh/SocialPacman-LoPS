@@ -55,6 +55,10 @@ class UtilityConfig:
     输入语义：调用方可覆盖旧脚本中写死的深度、阈值、随机和惰性系数。
     输出语义：策略构造时从该配置读取参数，默认值复现 fMRI 目标路径。
     关键约束：默认随机系数和惰性系数均为 0，因此保存的 Q 值不受随机数影响。
+    Evade 默认只搜索 6 步，把它限定为对近距离正常 ghost 的即时躲避策略，避免把
+    7--10 步外、恰好与资源目标反向的远处 ghost 误解释成主动躲避目标。
+    Approach 默认搜索 20 步，用于表达玩家在 energizer 后跨较长地图距离追逐 scared
+    ghost 的行为；该范围明显长于 Evade，二者分别对应远程追逐和近程避险。
     """
 
     randomness_coeff: float = 0.0
@@ -66,10 +70,10 @@ class UtilityConfig:
     local_depth: int = 10
     local_ghost_attractive_thr: int = 10
     local_ghost_repulsive_thr: int = 10
-    evade_depth: int = 10
+    evade_depth: int = 6
     evade_ghost_attractive_thr: int = 0
     evade_ghost_repulsive_thr: int = 0
-    approach_depth: int = 10
+    approach_depth: int = 20
     approach_ghost_attractive_thr: int = 0
     approach_ghost_repulsive_thr: int = 0
     energizer_depth: int = 10

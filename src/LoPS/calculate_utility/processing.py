@@ -45,9 +45,10 @@ LEGACY_STATUS_COLUMNS: tuple[str, ...] = ("ifscared1", "ifscared2")
 class CalculateUtilityConfig:
     """保存集中 utility 计算阶段的配置。
 
-    输入语义：utility_config 控制 raw Q 的策略深度等参数；global_cluster_radius
-    控制 cluster global 可考虑的最远资源团距离；global_cluster_distance_threshold
-    控制 cluster global 候选中资源点的聚类半径。
+    输入语义：utility_config 控制旧七策略 raw Q 的深度等参数；global_cluster_radius
+    控制 cluster Global 可考虑的最远资源团距离；global_cluster_distance_threshold
+    控制 cluster Global 候选中资源点的聚类半径。utility_config 中旧 Global 使用的
+    global_ignore_depth 不再限制 cluster Global，因为后者表示持续朝特定资源团移动。
     输出语义：配置对象被文件级和目录级处理函数共享。
     关键约束：当前阶段只生成逐行候选 utility，不根据 context 选择 best global；
     best global 的选择发生在 06b。
@@ -218,8 +219,9 @@ def global_cluster_q_for_row(
     map_data/adjacent_map 来自统一地图常量；config 提供聚类阈值和 global 距离范围。
     输出语义：返回 raw utility 矩阵、normalized utility 矩阵和与矩阵行对齐的 meta。
     关键约束：这里不选择 best cluster。每个 cluster 的四方向 raw Q 表示“走该方向后
-    到这团资源的距离减少量 × cluster_size”；普通豆和 energizer 在 global 中同权重，
-    因此 cluster_size 只按资源点数量计数。
+    到这团资源的距离减少量 × cluster_size”；普通豆和 energizer 在 Global 中同权重，
+    因此 cluster_size 只按资源点数量计数。目标团进入 10 步范围后仍继续计算 Q，Global
+    与 Local 由“持续目标团”和“附近即时资源”区分，而不再由硬距离阈值强制切换。
     """
 
     position = parse_position(row["pacmanPos"])
@@ -237,11 +239,10 @@ def global_cluster_q_for_row(
     for cluster_id, cluster in enumerate(clusters):
         min_distance = cluster_min_distance(position, cluster, map_data)
         raw_q = [float("-inf")] * len(DIRECTION_NAMES)
-        in_global_range = (
-            np.isfinite(min_distance)
-            and min_distance > config.utility_config.global_ignore_depth
-            and min_distance <= config.global_cluster_radius
-        )
+        # Cluster Global 表示玩家是否持续朝某个特定资源团移动，因此接近目标团后也应
+        # 保留方向证据。旧 Global 的 global_ignore_depth=10 只属于旧区域搜索定义；若
+        # 在这里复用，会使同一长 context 的后半段突然变成全零，并错误压低正确目标团。
+        in_global_range = np.isfinite(min_distance) and min_distance <= config.global_cluster_radius
 
         for direction_index, direction in enumerate(DIRECTION_NAMES):
             adjacent_value = adjacent_map[position][direction]
@@ -404,16 +405,20 @@ def make_evade_q_non_negative(
 
     输入语义：q_values 是单帧四方向 Q 数组，offset 是该列全局有限最小值。
     输出语义：返回归一化后的数组。
-    关键约束：该函数会原地修改 q_values；这是为了复现当前 weight_data 中保存的 raw Q。
+    关键约束：平移和归一化只能作用于输入副本，不能修改 DataFrame 中保存的 raw Q。
     """
 
+    # DataFrame 的 deep copy 不会递归复制 object 单元格中的 numpy 数组。如果直接
+    # 修改 q_values，生成 Q_norm 的同时会悄悄改写同一行的 raw Q。因此这里必须
+    # 显式创建数值副本，并让后续全部操作只发生在副本上。
+    working_q = np.asarray(q_values, dtype=float).copy()
     available_indices: list[int] = []
     for direction in DIRECTION_NAMES:
         adjacent_value = adjacent_map[position][direction]
         if adjacent_value is not None and not isinstance(adjacent_value, float):
             available_indices.append(DIRECTION_NAMES.index(direction))
-    q_values[available_indices] = q_values[available_indices] - offset
-    return normalize_with_inf(q_values)
+    working_q[available_indices] = working_q[available_indices] - offset
+    return normalize_with_inf(working_q)
 
 
 def prepare_standard_analysis_columns(data: pd.DataFrame) -> pd.DataFrame:
@@ -457,15 +462,43 @@ def add_temporary_arrive_direction(data: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def normalize_ghost_status_column(values: pd.Series, column: str) -> pd.Series:
+    """把一列 ghost 状态规范为经过验证的整数。
+
+    输入语义：values 是 04 阶段生成的 ifscared 状态列，column 用于错误信息定位。
+    输出语义：返回与输入索引一致的 int64 Series。
+    关键约束：缺失、无穷和非整数状态都直接报错；有限整值 float 可以安全转换，
+    但绝不能因为其 dtype 是 float 就被解释成缺失状态。
+    """
+
+    numeric = pd.to_numeric(values, errors="raise")
+    # 使用 float64 临时视图只用于有限性和整数性校验；最终返回值仍是整数。
+    numeric_array = numeric.to_numpy(dtype=float, na_value=np.nan)
+    invalid_finite = ~np.isfinite(numeric_array)
+    if np.any(invalid_finite):
+        invalid_indices = values.index[invalid_finite].tolist()[:5]
+        raise ValueError(f"{column} 包含缺失或无穷状态，示例索引：{invalid_indices}")
+
+    non_integer = numeric_array != np.floor(numeric_array)
+    if np.any(non_integer):
+        invalid_indices = values.index[non_integer].tolist()[:5]
+        invalid_values = numeric_array[non_integer][:5].tolist()
+        raise ValueError(
+            f"{column} 包含非整数 ghost 状态，示例索引和值："
+            f"{list(zip(invalid_indices, invalid_values))}"
+        )
+
+    return numeric.astype(np.int64)
+
+
 def build_utility_estimation_input(data: pd.DataFrame) -> pd.DataFrame:
     """构造只供 Q 估计器使用的临时输入表。
 
     输入语义：data 是新 schema 的 corrected tile 表，ghost 状态字段已经是 int8。
-    输出语义：返回带临时 ``pacman_dir`` 的 DataFrame，并把 ifscared 字段临时转为
-    float。
-    关键约束：旧 Q 结果是在 ifscared 为 float 的输入上生成的，而历史风险判断会把
-    float 状态当作缺失标记；为了保证科研结果一致，这个兼容只发生在估计器入口，
-    正式输出会恢复为新 schema 的 int8 状态码。
+    输出语义：返回带临时 ``pacman_dir`` 的 DataFrame，并把 ifscared 字段规范为
+    经过有限性和整数性验证的整数。
+    关键约束：当前标准 schema 已经使用整数状态；不得转换为 float，否则风险函数
+    可能把有限浮点状态误判为缺失值，进而改变所有 ghost 相关路径的终止条件。
     """
 
     result = add_temporary_arrive_direction(data)
@@ -473,7 +506,7 @@ def build_utility_estimation_input(data: pd.DataFrame) -> pd.DataFrame:
     if missing_columns:
         raise ValueError(f"计算 utility 缺少 ghost 状态字段：{missing_columns}")
     for column in LEGACY_STATUS_COLUMNS:
-        result[column] = pd.to_numeric(result[column], errors="raise").astype(float)
+        result[column] = normalize_ghost_status_column(result[column], column)
     return result
 
 

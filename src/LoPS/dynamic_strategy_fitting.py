@@ -61,7 +61,8 @@ class DynamicStrategyFittingConfig:
     random_seed: int | None = None
     segment_workers: int = 1
     use_segment_seed: bool = False
-    local_bean_distance_threshold: int = 10
+    bean_event_suppression_window: int = 3
+    ghost_stay_suppression_window: int = 5
     min_effective_action_count: int = 4
     min_effective_action_ratio: float = 0.5
 
@@ -1104,7 +1105,8 @@ def process_dynamic_strategy_file(
             random_seed=config.random_seed + file_index,
             segment_workers=config.segment_workers,
             use_segment_seed=config.use_segment_seed,
-            local_bean_distance_threshold=config.local_bean_distance_threshold,
+            bean_event_suppression_window=config.bean_event_suppression_window,
+            ghost_stay_suppression_window=config.ghost_stay_suppression_window,
             min_effective_action_count=config.min_effective_action_count,
             min_effective_action_ratio=config.min_effective_action_ratio,
         )

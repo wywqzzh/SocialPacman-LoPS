@@ -1,8 +1,9 @@
 """事件硬边界版 Social Pacman 动态策略拟合。
 
 本模块是 06 动态策略拟合的实验新版。它复用旧 06 的权重拟合器和输出字段，
-只替换 context 划分方式：先按玩家行为事件生成不可跨越的硬边界，再只把掉头
-作为软方向边界，最后在不跨硬边界的前提下合并软边界造成的过短段。
+只替换 context 划分方式：先按玩家自己的行为事件生成不可跨越的硬边界，再把掉头
+和队友造成的高影响公共环境事件作为软边界，最后在不跨硬边界的前提下合并软边界
+造成的过短段。
 """
 
 from __future__ import annotations
@@ -26,9 +27,6 @@ from LoPS.dynamic_strategy_fitting import (
     initialize_player_result,
     prepare_fitting_dataframe,
 )
-from LoPS.hierarchical_utility import MapData
-
-
 OPPOSITE_DIRECTIONS: dict[str, str] = {
     "left": "right",
     "right": "left",
@@ -407,8 +405,9 @@ def append_player_event_columns(data: pd.DataFrame, players: list[str]) -> pd.Da
     输入语义：data 是 05 utility 输出表，players 是实际存在的玩家前缀。
     输出语义：返回追加 ``p1_eat_bean/p1_eat_energizer/p1_eat_ghost`` 等列的副本。
     关键约束：事件列标在事件发生后的到达行。也就是说，若第 i 行动作让玩家在
-    第 i+1 行吃到资源，则第 i+1 行对应玩家事件为 True；06 会回推到第 i 行动作
-    构造硬边界，07 也继续沿用旧规则中的 ``event_index - 1`` 时间对齐。
+    第 i+1 行吃到资源，则第 i+1 行对应玩家事件为 True。06b/06c 的 context 边界
+    必须直接使用这个事件行，不能回推到动作行；07 的策略归因可按自身规则另行读取
+    前一动作，但不得反向改变事件位置的定义。
     """
 
     result = data.copy(deep=True)
@@ -569,143 +568,99 @@ def action_is_missing(value: Any) -> bool:
     return not isinstance(value, str)
 
 
-def action_arrival_position(
-    trial_data: pd.DataFrame,
-    player: str,
-    action_index: int,
-) -> tuple[int, int] | None:
-    """读取某个动作完成后的玩家到达位置。
-
-    输入语义：action_index 表示第 action_index 行到下一行之间的动作；资源事件列也标在
-    下一行，因此到达位置读取 ``action_index + 1`` 行的 ``<player>_pos``。
-    输出语义：合法坐标返回 ``(x, y)``，越界或缺失时返回 None。
-    关键约束：本函数只用于判断连续采食事件的空间相邻性，不改变任何原始坐标。
-    """
-
-    arrival_index = action_index + 1
-    position_column = f"{player}_pos"
-    if arrival_index >= len(trial_data) or position_column not in trial_data.columns:
-        return None
-    return parse_position_or_none(trial_data[position_column].iloc[arrival_index])
-
-
-def nearest_non_missing_action_index(action_values: list[Any], start_index: int, step: int) -> int | None:
-    """从指定位置开始寻找最近的非缺失动作行。
-
-    输入语义：action_values 是单 trial 动作序列，start_index 是搜索起点，step 为 -1
-    表示向前找、1 表示向后找。
-    输出语义：返回最近的有效动作下标；若一路都是 NaN/stay 则返回 None。
-    关键约束：该函数只跳过缺失动作。长 stay 仍会由 hard_boundary_points 中独立的
-    长 stay 硬边界阻断，不会因为这里跳过 NaN 而被实际跨越。
-    """
-
-    index = start_index
-    while 0 <= index < len(action_values):
-        if not action_is_missing(action_values[index]):
-            return index
-        index += step
-    return None
-
-
-def positions_are_adjacent(
-    first_position: tuple[int, int] | None,
-    second_position: tuple[int, int] | None,
-    map_data: MapData | None,
-) -> bool:
-    """判断两个资源到达位置在地图上是否相邻。
-
-    输入语义：first_position/second_position 是两次资源事件的到达坐标，map_data 提供
-    最短路径距离。
-    输出语义：两个位置之间地图最短距离为 1 时返回 True。
-    关键约束：使用地图距离表而不是坐标差，保证 tunnel 和鬼屋修正后的连通性一致。
-    """
-
-    if first_position is None or second_position is None or map_data is None:
-        return False
-    distance_lookup = map_data.distance_by_position.get(first_position, {})
-    return distance_lookup.get(second_position) == 1
-
-
-def suppress_bean_boundaries_around_energizer(
-    trial_data: pd.DataFrame,
-    player: str,
-    bean_ranges: list[tuple[int, int]],
-    energizer_action_flags: list[bool],
-    map_data: MapData | None,
+def suppress_bean_boundaries_near_events(
+    bean_start_points: set[int],
+    bean_end_points: set[int],
+    event_boundaries: set[int],
+    window: int,
 ) -> set[int]:
-    """识别应从硬边界中删除的“普通豆-energizer”连接边界。
+    """按事件方向找出强事件附近应取消的普通豆边界。
 
-    输入语义：bean_ranges 是普通豆连续动作段，energizer_action_flags 标记每个动作是否
-    吃到 energizer，map_data 用于判断资源位置是否相邻。
-    输出语义：返回需要从硬边界集合中删除的局部边界下标。
-    关键约束：energizer 常嵌在连续采食轨迹中。若 energizer 前一个有效动作是普通豆段
-    终止，且普通豆到达位置与 energizer 到达位置相邻，则删除普通豆终止边界以及
-    energizer 起点边界；后侧的普通豆开始边界同理。这样只移除“资源连续性”造成的
-    人工切点，死亡、吃鬼、长 stay 等其它硬边界不会被本函数删除。
+    输入语义：bean_start_points/bean_end_points 分别是连续吃普通豆过程的首个和末个
+    实际事件行；event_boundaries 包含 trial、生死、energizer、吃 ghost 和长 stay 等
+    强事件点；window 是前后时间窗口，单位为 tile。
+    输出语义：返回需要从普通豆边界集合中删除的局部边界下标。
+    关键约束：只删除“朝向强事件”的一侧边界：强事件前 window 内的吃豆结束点，
+    以及强事件后 window 内的吃豆开始点。未来强事件不能删除此前的吃豆开始，过去
+    强事件也不能删除此后的吃豆结束。函数绝不删除强事件本身；距离使用同一 trial
+    内的 tile 下标，而不是地图空间距离。
     """
 
-    if map_data is None:
-        return set()
+    if window < 0:
+        raise ValueError("bean event suppression window 不能小于 0。")
 
-    action_values = trial_data["action_dir"].tolist()
-    # 记录普通豆连续段的第一个/最后一个真实吃豆动作。由于 bean_ranges 已经允许
-    # 短暂 NaN 连接，start/end 本身正好表达“普通豆段开始/终止”的硬边界。
-    bean_start_boundary_by_action = {start: start for start, _ in bean_ranges}
-    bean_end_boundary_by_action = {end - 1: end for _, end in bean_ranges if end > 0}
-    suppressed_boundaries: set[int] = set()
+    # 吃豆开始点只有在强事件已经发生、且开始点紧随其后时才冗余。例如 energizer
+    # 后立刻继续吃普通豆时，energizer 强边界已经足以标记新阶段。
+    suppressed_starts = {
+        bean_start
+        for bean_start in bean_start_points
+        if any(0 <= bean_start - event_boundary <= window for event_boundary in event_boundaries)
+    }
+    # 吃豆结束点只有在强事件即将发生、且位于结束点之后时才冗余。例如吃豆后立刻
+    # 吃 energizer 或进入长 stay，保留后面的强边界即可。
+    suppressed_ends = {
+        bean_end
+        for bean_end in bean_end_points
+        if any(0 <= event_boundary - bean_end <= window for event_boundary in event_boundaries)
+    }
+    return suppressed_starts | suppressed_ends
 
-    for energizer_action_index, ate_energizer in enumerate(energizer_action_flags):
-        if not ate_energizer:
+
+def suppress_stay_ranges_near_ghost(
+    stay_ranges: list[tuple[int, int]],
+    eat_ghost_indices: list[int],
+    window: int,
+) -> set[tuple[int, int]]:
+    """找出吃 ghost 事件前后应取消切段作用的长 stay 区间。
+
+    输入语义：stay_ranges 是长 stay 的半开行区间，eat_ghost_indices 是当前玩家私有的
+    吃 ghost 事件行，window 是前后时间窗口，单位为 tile。
+    输出语义：返回整段不再加入硬边界的 stay 区间集合。
+    关键约束：只取消 stay 的开始/结束硬边界，不删除原始无动作行，也不删除 eat ghost
+    强事件。事件位于 stay 内部时距离为 0；位于外部时按事件行到最近 stay 行计算。
+    """
+
+    if window < 0:
+        raise ValueError("ghost stay suppression window 不能小于 0。")
+
+    suppressed: set[tuple[int, int]] = set()
+    for start, end in stay_ranges:
+        if end <= start:
             continue
-        energizer_position = action_arrival_position(trial_data, player, energizer_action_index)
-
-        previous_action_index = nearest_non_missing_action_index(
-            action_values,
-            energizer_action_index - 1,
-            step=-1,
-        )
-        if previous_action_index in bean_end_boundary_by_action:
-            previous_bean_position = action_arrival_position(trial_data, player, previous_action_index)
-            if positions_are_adjacent(previous_bean_position, energizer_position, map_data):
-                # 删除普通豆段终止边界；同时删除 energizer 起点边界，使“普通豆 -> energizer”
-                # 在空间连续时保持为同一个资源采食段。
-                suppressed_boundaries.add(bean_end_boundary_by_action[previous_action_index])
-                suppressed_boundaries.add(energizer_action_index)
-
-        next_action_index = nearest_non_missing_action_index(
-            action_values,
-            energizer_action_index + 1,
-            step=1,
-        )
-        if next_action_index in bean_start_boundary_by_action:
-            next_bean_position = action_arrival_position(trial_data, player, next_action_index)
-            if positions_are_adjacent(energizer_position, next_bean_position, map_data):
-                # 删除 energizer 终点边界和后侧普通豆开始边界，使“energizer -> 普通豆”
-                # 在空间连续时不会被切成长度很短的独立段。
-                suppressed_boundaries.add(energizer_action_index + 1)
-                suppressed_boundaries.add(bean_start_boundary_by_action[next_action_index])
-
-    return suppressed_boundaries
+        for event_index in eat_ghost_indices:
+            if start <= event_index < end:
+                distance = 0
+            elif event_index < start:
+                distance = start - event_index
+            else:
+                distance = event_index - (end - 1)
+            if distance <= window:
+                suppressed.add((start, end))
+                break
+    return suppressed
 
 
 def hard_boundary_points(
     trial_data: pd.DataFrame,
     player: str,
     stay_length: int,
-    map_data: MapData | None = None,
+    bean_event_suppression_window: int = 3,
+    ghost_stay_suppression_window: int = 5,
 ) -> set[int]:
     """生成单个 trial 内不可跨越的硬边界。
 
     输入语义：trial_data 是 reset index 后的单 trial 临时表，player 是当前拟合玩家，
-    map_data 用于判断 energizer 前后普通豆事件是否空间连续。
+    bean_event_suppression_window 指定普通豆起止边界在强事件前后的取消窗口；
+    ghost_stay_suppression_window 指定吃 ghost 事件前后取消长 stay 切段作用的窗口。
     输出语义：返回局部行号边界集合，包含 0 和 len(trial_data)。
     关键约束：硬边界表达行为事件的语义变化；短段合并时绝对不能跨过这些边界。
-    但当 energizer 嵌在连续普通豆采食轨迹中时，普通豆段在 energizer 前后的起止边界
-    会被抑制，避免把一条连续采食路径切成多个长度为 1 的小段。
+    普通豆起止是可抑制的弱硬边界；trial、生死、energizer 和吃 ghost 是始终保留的
+    强硬边界。长 stay 默认也是强边界，但若处于当前玩家吃 ghost 事件前后指定窗口，
+    则取消该 stay 的切段作用，避免 ghost 交互动画附近产生碎段。
     """
 
     row_count = len(trial_data)
-    boundaries: set[int] = {0, row_count}
+    strong_boundaries: set[int] = {0, row_count}
 
     # Pacman 生死变化会改变动作意义，死亡/复活前后的段落不能合并。
     alive_column = f"{player}_alive"
@@ -713,65 +668,83 @@ def hard_boundary_points(
         alive_values = trial_data[alive_column].astype(bool).tolist()
         for index in range(1, row_count):
             if alive_values[index] != alive_values[index - 1]:
-                boundaries.add(index)
+                strong_boundaries.add(index)
 
-    # 普通豆和 energizer 分开处理。普通豆代表连续采食轨迹，允许中间夹短暂
-    # NaN/stay；energizer 是强策略事件，仍然保持单独硬边界。
+    # 普通豆和 energizer 分开处理。事件列本身已经标在事件发生行，context 切段
+    # 只能使用这些事件行，不能把导致事件的前一动作行当作事件边界。
+    #
+    # 连续吃豆的识别仍需要动作序列：短 NaN/stay 可以连接前后吃豆事件。这里先用
+    # action flags 判断哪些 bean 事件属于同一过程，再把动作范围转换回首个和末个
+    # 实际事件行。动作范围只是内部识别工具，不会直接进入最终边界集合。
     bean_action_flags: list[bool] = []
-    energizer_eat_flags: list[bool] = []
     eat_bean_column = f"{player}_eat_bean"
     eat_energizer_column = f"{player}_eat_energizer"
     for index in range(row_count):
         if index >= row_count - 1:
             bean_action_flags.append(False)
-            energizer_eat_flags.append(False)
             continue
         bean_eaten = bool(trial_data[eat_bean_column].iloc[index + 1]) if eat_bean_column in trial_data.columns else False
-        energizer_eaten = (
-            bool(trial_data[eat_energizer_column].iloc[index + 1])
-            if eat_energizer_column in trial_data.columns
-            else False
-        )
         bean_action_flags.append(bool(bean_eaten))
-        energizer_eat_flags.append(bool(energizer_eaten))
-    bean_ranges = bean_run_ranges_allow_short_stay(
+    bean_action_ranges = bean_run_ranges_allow_short_stay(
         bean_action_flags,
         trial_data["action_dir"].tolist(),
         stay_length,
     )
-    suppressed_resource_boundaries = suppress_bean_boundaries_around_energizer(
-        trial_data,
-        player,
-        bean_ranges,
-        energizer_eat_flags,
-        map_data,
-    )
-    for start, end in bean_ranges:
-        boundaries.add(start)
-        boundaries.add(end)
-    # 吃 energizer 是资源段的一种，但它也作为单独硬事件保留一行动作边界，
-    # 避免单帧 energizer 事件被较长普通吃豆段完全吞掉。
-    for start, end in true_run_ranges(energizer_eat_flags):
-        boundaries.add(start)
-        boundaries.add(end)
-    boundaries.difference_update(suppressed_resource_boundaries)
+    bean_start_points: set[int] = set()
+    bean_end_points: set[int] = set()
+    for action_start, action_end in bean_action_ranges:
+        # action_start 的动作导致 action_start+1 行第一次记录 eat_bean；action_end-1
+        # 的动作导致 action_end 行最后一次记录 eat_bean。因此实际事件点分别是
+        # action_start+1 和 action_end，不能使用动作范围自身的左右边界。
+        first_event = action_start + 1
+        last_event = action_end
+        if 0 <= first_event < row_count:
+            bean_start_points.add(first_event)
+        if 0 <= last_event < row_count:
+            bean_end_points.add(last_event)
+
+    # Energizer 是单点强事件。事件列已经标在吃到 energizer 后的到达行，因此直接
+    # 加入 True 所在行；不再回推前一动作，也不人为构造一行宽的 [start, end) 区间。
+    if eat_energizer_column in trial_data.columns:
+        energizer_indices = trial_data.index[trial_data[eat_energizer_column].astype(bool)].tolist()
+        strong_boundaries.update(int(index) for index in energizer_indices)
 
     # 吃 ghost 也只使用当前玩家自己的事件列。事件列标在 ghost 进入 dead 的行，
     # 这里沿用上一版做法，只把状态转变行作为硬边界。
     eat_ghost_column = f"{player}_eat_ghost"
+    eaten_indices: list[int] = []
     if eat_ghost_column in trial_data.columns:
         eaten_indices = trial_data.index[trial_data[eat_ghost_column].astype(bool)].tolist()
         for index in eaten_indices:
-            boundaries.add(int(index))
+            strong_boundaries.add(int(index))
 
-    # 长 stay 段是明确的静止事件，作为硬边界独立出来。短暂 NaN 不在这里硬切，
-    # 后续会在同一硬区间内按软规则处理。
+    # 长 stay 默认作为强边界；但 ghost 被吃前后的停顿常来自交互/动画，而不是玩家主动
+    # stay。若整段 stay 距当前玩家任一 eat_ghost 行不超过窗口，则同时取消其起止边界。
     missing_flags = [action_is_missing(value) for value in trial_data["action_dir"]]
-    for start, end in true_run_ranges(missing_flags):
-        if end - start >= stay_length:
-            boundaries.add(start)
-            boundaries.add(end)
+    long_stay_ranges = [
+        (start, end)
+        for start, end in true_run_ranges(missing_flags)
+        if end - start >= stay_length
+    ]
+    suppressed_stay_ranges = suppress_stay_ranges_near_ghost(
+        long_stay_ranges,
+        [int(index) for index in eaten_indices],
+        ghost_stay_suppression_window,
+    )
+    for start, end in long_stay_ranges:
+        if (start, end) not in suppressed_stay_ranges:
+            strong_boundaries.add(start)
+            strong_boundaries.add(end)
 
+    suppressed_bean_boundaries = suppress_bean_boundaries_near_events(
+        bean_start_points,
+        bean_end_points,
+        strong_boundaries,
+        bean_event_suppression_window,
+    )
+    bean_event_points = bean_start_points | bean_end_points
+    retained_bean_boundaries = bean_event_points - suppressed_bean_boundaries
+    boundaries = strong_boundaries | retained_bean_boundaries
     return {boundary for boundary in boundaries if 0 <= boundary <= row_count}
 
 
@@ -795,73 +768,26 @@ def soft_turnaround_points(trial_data: pd.DataFrame) -> set[int]:
     return boundaries
 
 
-def nearest_ordinary_bean_distance(
-    position: tuple[int, int] | None,
-    bean_positions: set[tuple[int, int]],
-    map_data: MapData | None,
-) -> float:
-    """计算当前位置到最近普通豆子的地图最短距离。
+def soft_teammate_event_points(trial_data: pd.DataFrame, player: str) -> set[int]:
+    """生成队友高影响事件对应的公共环境软边界。
 
-    输入语义：position 是当前玩家坐标，bean_positions 是当前行剩余普通豆集合，
-    map_data 是地图常量中的最短路径距离表。
-    输出语义：返回最近普通豆子的最短路径距离；缺少坐标、没有普通豆或无法查询距离时
-    返回 ``np.inf``。
-    关键约束：这里只看 ``beans``，不看 energizer。energizer 已经作为独立强事件参与
-    context 划分，若再混入 local 范围边界，会让 local 与 energizer 的语义重叠。
+    输入语义：trial_data 是单 trial 临时表，player 是当前正在划分 context 的玩家。
+    输出语义：返回另一名玩家吃 energizer 或 ghost 的真实事件行集合。
+    关键约束：这些事件改变两名玩家共同面对的 ghost 状态，但不代表当前玩家自己完成
+    了事件，因此只作为软边界；后续长度合并可以取消会制造过短 context 的边界。
+    普通豆事件不共享，ghost 按计时器自然恢复也不在这里生成边界。
     """
-
-    if position is None or not bean_positions or map_data is None:
-        return float("inf")
-    distance_lookup = map_data.distance_by_position.get(position)
-    if distance_lookup is None:
-        return float("inf")
-    distances = [distance_lookup.get(bean_position, float("inf")) for bean_position in bean_positions]
-    if not distances:
-        return float("inf")
-    return float(min(distances))
-
-
-def soft_local_bean_range_points(
-    trial_data: pd.DataFrame,
-    player: str,
-    map_data: MapData | None,
-    distance_threshold: int,
-) -> set[int]:
-    """生成进入或离开普通豆 local 范围的软边界。
-
-    输入语义：trial_data 是单 trial 的玩家临时拟合表，player 指定当前玩家，
-    map_data 提供地图最短路径距离，distance_threshold 通常等于旧 utility 的
-    ``local_depth=10``。
-    输出语义：返回局部行号边界集合；第 i 行边界表示第 i 行相对第 i-1 行发生
-    ``最近普通豆距离 <= threshold`` 状态切换。
-    关键约束：这是软边界，不是硬事件。后续仍会在同一硬边界区间内合并过短段，
-    避免距离在阈值附近抖动时制造过多 1-2 行碎段。每个玩家使用自己的位置列，因此
-    双人任务中 p1/p2 的 local 范围切点彼此独立。
-    """
-
-    if map_data is None or distance_threshold <= 0:
-        return set()
-    position_column = f"{player}_pos"
-    if position_column not in trial_data.columns or "beans" not in trial_data.columns:
-        return set()
-
-    alive_column = f"{player}_alive"
-    in_local_range: list[bool] = []
-    for _, row in trial_data.iterrows():
-        # 玩家死亡或缺失时不把当前位置解释为 local 采食范围，避免死亡停留点生成
-        # 没有行为意义的软切点。
-        if alive_column in trial_data.columns and not bool(row[alive_column]):
-            in_local_range.append(False)
-            continue
-        position = parse_position_or_none(row[position_column])
-        bean_positions = parse_position_set(row["beans"])
-        distance = nearest_ordinary_bean_distance(position, bean_positions, map_data)
-        in_local_range.append(distance <= distance_threshold)
 
     boundaries: set[int] = set()
-    for index in range(1, len(in_local_range)):
-        if in_local_range[index] != in_local_range[index - 1]:
-            boundaries.add(index)
+    for teammate in ("p1", "p2"):
+        if teammate == player:
+            continue
+        for event_name in ("eat_energizer", "eat_ghost"):
+            column = f"{teammate}_{event_name}"
+            if column not in trial_data.columns:
+                continue
+            event_indices = trial_data.index[trial_data[column].astype(bool)].tolist()
+            boundaries.update(int(index) for index in event_indices)
     return boundaries
 
 
@@ -913,16 +839,16 @@ def build_event_context_segments(
     prepared_data: pd.DataFrame,
     player: str,
     config: DynamicStrategyFittingConfig | None = None,
-    map_data: MapData | None = None,
 ) -> tuple[list[tuple[int, int]], list[bool]]:
     """按事件硬边界和掉头软边界构造全局 context 段落。
 
     输入语义：prepared_data 是 ``prepare_fitting_dataframe`` 生成的玩家临时表，
-    player 是当前拟合玩家，map_data 可选提供地图距离表以计算 local 范围软边界。
+    player 是当前拟合玩家。
     输出语义：返回全局 row_id 半开区间列表，以及每个区间是否为 stay/all-NaN 段。
-    关键约束：短段合并只发生在同一硬边界区间内部，绝不跨 trial、吃豆段、生死、
-    吃 energizer、吃 ghost 或长 stay 边界。进入/离开普通豆 local 范围只作为软边界，
-    允许在段落太短时被合并。
+    关键约束：短段合并只发生在同一硬边界区间内部，绝不跨当前玩家自己的 trial、
+    吃豆段、生死、energizer、吃 ghost 或长 stay 硬边界。软边界来自掉头和队友的
+    energizer/ghost 事件；队友事件只有在两侧能形成足够长段落时才保留。不再根据玩家
+    到普通豆的距离或 ghost 计时恢复生成任何 context 事件。
     """
 
     config = DynamicStrategyFittingConfig() if config is None else config
@@ -934,15 +860,20 @@ def build_event_context_segments(
         print(f"| ({trial_index}) {trial_name} | Event context data shape {trial_data.shape}")
 
         level_offset = int(trial_data["row_id"].iloc[0])
-        hard_boundaries = sorted(hard_boundary_points(trial_data, player, config.stay_length, map_data=map_data))
-        soft_boundaries = soft_turnaround_points(trial_data)
-        soft_boundaries.update(
-            soft_local_bean_range_points(
+        hard_boundaries = sorted(
+            hard_boundary_points(
                 trial_data,
                 player,
-                map_data,
-                config.local_bean_distance_threshold,
+                config.stay_length,
+                bean_event_suppression_window=config.bean_event_suppression_window,
+                ghost_stay_suppression_window=config.ghost_stay_suppression_window,
             )
+        )
+        # 掉头反映玩家自身动作结构；队友吃 energizer/ghost 则改变公共 ghost 环境。
+        # 两者都先作为候选软边界，再统一经过 min_length 合并，避免公共事件制造碎段。
+        soft_boundaries = soft_turnaround_points(trial_data) | soft_teammate_event_points(
+            trial_data,
+            player,
         )
 
         trial_contexts: list[tuple[int, int]] = []
@@ -966,7 +897,6 @@ def fit_player_strategy_event_context_dataframe(
     raw_data: pd.DataFrame,
     player: str,
     config: DynamicStrategyFittingConfig,
-    map_data: MapData | None = None,
 ) -> pd.DataFrame:
     """使用事件 context 为单个玩家拟合动态策略权重。
 
@@ -974,8 +904,7 @@ def fit_player_strategy_event_context_dataframe(
     输出语义：返回 ``<player>_weight``、``<player>_trial_context`` 等 06 兼容字段。
     关键约束：context 划分后会先选择每段 best cluster global，并覆盖临时表中的
     ``global_Q/global_Q_norm``；段落拟合、权重归一化和 07 所需输出字段保持原接口。
-    map_data 只用于 context 切分，不参与 best global 选择；best global 直接读取
-    05 已生成的候选 utility。
+    best global 直接读取 05 已生成的候选 utility，06b 不再为 context 读取地图距离。
     """
 
     if config.random_seed is not None:
@@ -987,7 +916,7 @@ def fit_player_strategy_event_context_dataframe(
     invalid_direction_indices = np.where(fit_data["available_dir"] == False)[0]
     fit_data.loc[fit_data.index[invalid_direction_indices], "action_dir"] = [np.nan] * len(invalid_direction_indices)
 
-    contexts, is_nan = build_event_context_segments(fit_data, player, config, map_data=map_data)
+    contexts, is_nan = build_event_context_segments(fit_data, player, config)
     fit_data = apply_best_global_candidates(fit_data, contexts, player)
     result_list, _, is_correct, predicted_direction, is_vague = fit_all_segments(
         fit_data,
@@ -1049,7 +978,6 @@ def fit_player_strategy_event_context_dataframe(
 def fit_dynamic_strategy_event_context_dataframe(
     raw_data: pd.DataFrame,
     config: DynamicStrategyFittingConfig | None = None,
-    map_data: MapData | None = None,
 ) -> pd.DataFrame:
     """对单个 joint-state 表执行事件 context 版动态策略拟合。
 
@@ -1063,7 +991,7 @@ def fit_dynamic_strategy_event_context_dataframe(
     players = discover_player_prefixes(base, config)
     result = append_player_event_columns(base, players)
     for player in players:
-        player_output = fit_player_strategy_event_context_dataframe(result, player, config, map_data=map_data)
+        player_output = fit_player_strategy_event_context_dataframe(result, player, config)
         for column in player_output.columns:
             result[column] = player_output[column].to_numpy()
     return result
@@ -1074,7 +1002,6 @@ def process_dynamic_strategy_event_context_file(
     output_path: str | Path,
     config: DynamicStrategyFittingConfig | None = None,
     file_index: int = 0,
-    map_data: MapData | None = None,
 ) -> dict[str, Any]:
     """处理单个 05 utility 文件并保存事件 context 版 06 输出。
 
@@ -1102,14 +1029,15 @@ def process_dynamic_strategy_event_context_file(
             random_seed=config.random_seed + file_index,
             segment_workers=config.segment_workers,
             use_segment_seed=config.use_segment_seed,
-            local_bean_distance_threshold=config.local_bean_distance_threshold,
+            bean_event_suppression_window=config.bean_event_suppression_window,
+            ghost_stay_suppression_window=config.ghost_stay_suppression_window,
             min_effective_action_count=config.min_effective_action_count,
             min_effective_action_ratio=config.min_effective_action_ratio,
         )
     else:
         file_config = config
 
-    result = fit_dynamic_strategy_event_context_dataframe(raw_data, file_config, map_data=map_data)
+    result = fit_dynamic_strategy_event_context_dataframe(raw_data, file_config)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     with output_file.open("wb") as file:
         pickle.dump(result, file)
@@ -1128,7 +1056,6 @@ def process_dynamic_strategy_event_context_directory(
     output_dir: str | Path,
     config: DynamicStrategyFittingConfig | None = None,
     workers: int = 1,
-    map_data: MapData | None = None,
 ) -> list[dict[str, Any]]:
     """批量处理嵌套目录中的 05 utility 文件。
 
@@ -1150,7 +1077,6 @@ def process_dynamic_strategy_event_context_directory(
             output_dir / input_file.relative_to(input_dir),
             config,
             file_index,
-            map_data,
         )
         for file_index, input_file in enumerate(input_files)
     ]
@@ -1161,9 +1087,9 @@ def process_dynamic_strategy_event_context_directory(
 
 
 def _process_event_context_task(
-    task: tuple[Path, Path, DynamicStrategyFittingConfig, int, MapData | None],
+    task: tuple[Path, Path, DynamicStrategyFittingConfig, int],
 ) -> dict[str, Any]:
     """执行目录级并行中的单文件事件 context 拟合任务。"""
 
-    input_path, output_path, config, file_index, map_data = task
-    return process_dynamic_strategy_event_context_file(input_path, output_path, config, file_index=file_index, map_data=map_data)
+    input_path, output_path, config, file_index = task
+    return process_dynamic_strategy_event_context_file(input_path, output_path, config, file_index=file_index)

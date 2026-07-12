@@ -56,8 +56,6 @@ PLAYER_REVISED_COLUMNS = (
     "strategy",
 )
 VAGUE_REVISE_MIN_ACCURACY = 0.70
-VAGUE_REVISE_MIN_VALID_ACTIONS = 4
-LOW_EVIDENCE_MIN_EFFECTIVE_ACTION_COUNT = 4
 LOW_EVIDENCE_MIN_EFFECTIVE_ACTION_RATIO = 0.5
 SCARED_GHOST_STATUS_MIN = 4
 
@@ -658,9 +656,9 @@ def revise_vague(data: pd.DataFrame, contexts: list[tuple[int, int]]) -> None:
     输出语义：只有至少一个单独策略能稳定预测真实方向时，才把 vague 段改写成这些策略。
     关键约束：本函数不再相信拟合权重中的唯一最大值。对于 vague 段，必须逐一计算
     七个单独策略的方向预测准确率；最优策略达到保守准确率阈值，且段落内有效动作
-    数量足够时，才取消 vague。若多个策略并列最高，修正权重会同时保留这些策略，
-    后续由统一优先级决定显示标签；否则保留 vague，避免把弱解释段或无信息段硬解释成
-    单一确定策略。
+    比例足够时，才取消 vague。这里不设置有效动作绝对数量门槛，避免完整的短行为段
+    仅因长度小于 4 而永远无法进入并列优先级。若多个策略并列最高，修正权重会同时
+    保留这些策略，后续由统一优先级决定显示标签。
     """
 
     for prev, end in contexts:
@@ -673,17 +671,9 @@ def revise_vague(data: pd.DataFrame, contexts: list[tuple[int, int]]) -> None:
             continue
 
         effective_action_ratio = context.valid_data.shape[0] / max(end - prev, 1)
-        if (
-            context.valid_data.shape[0] < LOW_EVIDENCE_MIN_EFFECTIVE_ACTION_COUNT
-            or effective_action_ratio < LOW_EVIDENCE_MIN_EFFECTIVE_ACTION_RATIO
-        ):
-            # 这些 vague 来自“有效动作证据不足”的段落，例如长停顿边缘或短回摆。
-            # 即使某个策略碰巧完全命中少数有效动作，也不能把它修回确定策略。
-            continue
-
-        # 过短段落容易因为一两个动作偶然命中而被误认为确定策略。这里要求至少
-        # 有 4 个有效动作，宁可保留 vague，也不制造伪确定性的策略标签。
-        if context.valid_data.shape[0] < VAGUE_REVISE_MIN_VALID_ACTIONS:
+        if effective_action_ratio < LOW_EVIDENCE_MIN_EFFECTIVE_ACTION_RATIO:
+            # 这里只限制有效动作在整个 context 中的占比。短 context 若每行都有动作，
+            # 仍可进入准确率比较；大量停顿夹杂少数动作的段落继续保留 vague。
             continue
 
         agent_accuracy, _ = score_agent_accuracies(context, list(range(len(AGENTS))))
@@ -833,7 +823,8 @@ def process_trial(data: pd.DataFrame, input_path: Path, trial_name: str, scared_
 
     输入语义：data 是同一 `DayTrial` 的切片，保留原始标签；trial_name 是 trial 名。
     输出语义：返回修正后的 two-ghost trial 数据。
-    关键约束：规则执行顺序必须与旧 `reviseMain` 一致。
+    关键约束：除当前临时停用的 Approach 二次修正外，其余规则执行顺序必须与既定
+    `reviseMain` 流程一致，避免前一条规则的输出尚未重算 strategy 就被后一条读取。
     """
 
     recompute_strategy(data, str(input_path), trial_name)
@@ -844,16 +835,21 @@ def process_trial(data: pd.DataFrame, input_path: Path, trial_name: str, scared_
     revise_vague(data, vague_contexts)
     recompute_strategy(data, str(input_path), trial_name)
 
-    context_approach = np.where(data["strategy"] == STRATEGY_NUMBER["approach"])[0]
-    context_approach = list(set(list(data["trial_context"].iloc[context_approach])))
-    context_approach = filter_contexts_to_trial(data, context_approach)
-    eat_ghost = np.where(data["eat_ghost"] == True)[0] - 1 + data["row_id"].iloc[0]
-    for prev, end in deepcopy(context_approach):
-        is_eat_ghost = [1 if prev <= eat_index < end else 0 for eat_index in eat_ghost]
-        if 1 in is_eat_ghost:
-            context_approach.remove((prev, end))
-    revise_approach(data, context_approach)
-    recompute_strategy(data, str(input_path), trial_name)
+    # 暂时停用所有 Approach 二次修正。06c/旧 06 已经根据完整 Q 证据得到 Approach；
+    # 双人任务中即使当前玩家没有亲自吃到 ghost，也可能是队友抢先吃掉，不能再把
+    # “未亲自吃到”当作否定追鬼意图的充分证据。保留原实现函数和以下调用草稿，
+    # 后续确定新的多人判据后可恢复，但当前流程不执行筛选、改权重或 strategy 重算。
+    #
+    # context_approach = np.where(data["strategy"] == STRATEGY_NUMBER["approach"])[0]
+    # context_approach = list(set(list(data["trial_context"].iloc[context_approach])))
+    # context_approach = filter_contexts_to_trial(data, context_approach)
+    # eat_ghost = np.where(data["eat_ghost"] == True)[0] - 1 + data["row_id"].iloc[0]
+    # for prev, end in deepcopy(context_approach):
+    #     is_eat_ghost = [1 if prev <= eat_index < end else 0 for eat_index in eat_ghost]
+    #     if 1 in is_eat_ghost:
+    #         context_approach.remove((prev, end))
+    # revise_approach(data, context_approach)
+    # recompute_strategy(data, str(input_path), trial_name)
 
     eat_energizer = np.where(data["eat_energizer"] == True)[0] - 1 + data["row_id"].iloc[0]
     eat_energizer_context = list(np.array(data["trial_context"].loc[eat_energizer]))

@@ -663,15 +663,30 @@ def _scare_active_ghosts(ghost_status: tuple[Any, ...]) -> tuple[Any, ...]:
     return tuple(4 if item != 3 else 3 for item in ghost_status)
 
 
-def _status_value(value: Any) -> Any:
-    """把缺失 ghost 状态转换为风险规则使用的普通状态值。
+def _status_value(value: Any) -> int:
+    """把 ghost 状态规范为风险规则使用的整数。
 
-    输入语义：value 可能是整数状态，也可能是浮点缺失标记。
-    输出语义：浮点缺失标记返回 0，其它值原样返回。
-    关键约束：该转换只用于条件判断，不改变策略状态本身。
+    输入语义：value 通常是 Python/NumPy 整数，也允许有限的整值 float；旧输入中的
+    ``None/NaN`` 仍视为缺失状态。
+    输出语义：缺失状态返回 0，其余合法数值返回对应整数。
+    关键约束：只有真正的缺失值可以映射为 0；不能再把所有 float 一概当作缺失。
+    非整数、无穷和非数值类型直接报错，避免静默改变 ghost 风险语义。
     """
 
-    return 0 if _is_float_marker(value) else value
+    if value is None:
+        return 0
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"ghost 状态不能是布尔值：{value!r}")
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        numeric_value = float(value)
+        if np.isnan(numeric_value):
+            return 0
+        if not np.isfinite(numeric_value) or not numeric_value.is_integer():
+            raise ValueError(f"ghost 状态必须是有限整数：{value!r}")
+        return int(numeric_value)
+    raise TypeError(f"无法解析 ghost 状态：{value!r}")
 
 
 def _apply_randomness_and_laziness(
@@ -697,14 +712,3 @@ def _apply_randomness_and_laziness(
     if last_direction_id is not None and last_direction_id in available_indices and laziness_coeff != 0:
         q_array[last_direction_id] += laziness_coeff * q_scale
     return q_array
-
-
-def _is_float_marker(value: Any) -> bool:
-    """判断值是否是浮点缺失或浮点标记。
-
-    输入语义：value 可能来自 DataFrame、解析状态或策略状态。
-    输出语义：Python float 和 numpy floating 返回 True。
-    关键约束：整数状态值不能被当作浮点标记。
-    """
-
-    return isinstance(value, (float, np.floating))

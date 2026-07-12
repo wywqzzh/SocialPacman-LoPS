@@ -1,0 +1,1004 @@
+"""06c：基于事件 Context 的潜在策略后验推断。
+
+本模块复用 06b 已验证的玩家私有事件和 context 划分，再把每段 GA 权重拟合替换为
+概率模型：先按 06b 规则选择解释动作最好的 Global cluster，随后统一归一化七种
+策略的 raw Q，通过 softmax 得到动作概率，并在文件内拟合一个或两个 temperature。
+
+06c 与 06b 完全隔离。输入和输出仍是一份 P1/P2 时间对齐的 joint-state DataFrame，
+但 06c 不生成具有旧 GA 语义的 weight 字段。
+"""
+
+from __future__ import annotations
+
+import copy
+import math
+import pickle
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable
+
+import numpy as np
+import pandas as pd
+from scipy.optimize import minimize_scalar
+from scipy.special import logsumexp
+
+from LoPS.dynamic_strategy_event_context import (
+    append_player_event_columns,
+    apply_best_global_candidates,
+    build_event_context_segments,
+)
+from LoPS.dynamic_strategy_fitting import DEFAULT_AGENTS, DynamicStrategyFittingConfig
+
+
+DIRECTION_NAMES: tuple[str, ...] = ("left", "right", "up", "down")
+DIRECTION_TO_INDEX: dict[str, int] = {name: index for index, name in enumerate(DIRECTION_NAMES)}
+PLAYER_PREFIXES: tuple[str, ...] = ("p1", "p2")
+STRATEGY_NUMBER: dict[str, int] = {
+    "global": 0,
+    "local": 1,
+    "evade_blinky": 2,
+    "evade_clyde": 3,
+    "approach": 6,
+    "energizer": 7,
+    "no_energizer": 8,
+    "vague": 9,
+    "stay": 10,
+}
+
+
+@dataclass(frozen=True)
+class ContextStrategyPosteriorConfig:
+    """保存 06c context 后验拟合参数。
+
+    输入语义：调用方可设置 context 边界参数、beta 搜索范围、交叉验证折数和文件级
+    随机种子。
+    输出语义：该不可变配置会贯穿 DataFrame、单文件和目录级处理。
+    关键约束：``agents`` 顺序同时定义 likelihood/posterior 数组顺序，不可在处理中重排。
+    """
+
+    agents: tuple[str, ...] = DEFAULT_AGENTS
+    stay_length: int = 4
+    bean_event_suppression_window: int = 3
+    ghost_stay_suppression_window: int = 5
+    beta_min: float = 0.05
+    beta_max: float = 20.0
+    beta_grid_size: int = 81
+    cv_folds: int = 5
+    posterior_threshold: float = 0.70
+    random_seed: int = 20260610
+
+
+@dataclass(frozen=True)
+class ContextObservation:
+    """保存一个 player-context 参与概率拟合的数据。
+
+    输入语义：``q_values`` 形状为 ``有效动作数 × 策略数 × 4``，已完成合法方向
+    Min-Max；``action_indices`` 与第一维逐行对齐。
+    输出语义：对象可以直接用于任意 beta 下的 context likelihood 计算。
+    关键约束：context 使用全文件半开区间；无有效动作段的数组第一维为 0，并由
+    ``is_stay`` 标记，不进入 beta loss。
+    """
+
+    player: str
+    trial_name: str
+    context: tuple[int, int]
+    is_stay: bool
+    row_indices: np.ndarray
+    action_indices: np.ndarray
+    q_values: np.ndarray
+    null_log_likelihood: float
+
+    @property
+    def valid_action_count(self) -> int:
+        """返回当前 context 中实际进入 likelihood 的动作数量。"""
+
+        return int(self.action_indices.size)
+
+
+@dataclass(frozen=True)
+class BetaFitResult:
+    """保存一次一维 beta 优化结果。
+
+    输入语义：``beta`` 是 temperature，``loss`` 是指定 contexts 的最小边际 NLL。
+    输出语义：用于完整文件模型、分玩家模型及交叉验证结果汇总。
+    关键约束：beta 始终位于配置给出的闭区间内。
+    """
+
+    beta: float
+    loss: float
+
+
+@dataclass(frozen=True)
+class ObservationBatch:
+    """保存一组 contexts 的批量 likelihood 数组。
+
+    输入语义：``q_values/action_indices`` 拼接所有有效动作，``context_starts`` 标记
+    每个 context 在动作轴上的起点。
+    输出语义：同一 beta 下可一次完成全部动作 softmax，再按 context 聚合。
+    关键约束：批量化只改变计算组织方式，不改变先逐行动作 likelihood、再在 context
+    内求和、最后对潜在策略边际化的统计公式。
+    """
+
+    q_values: np.ndarray
+    action_indices: np.ndarray
+    context_starts: np.ndarray
+    context_count: int
+
+
+@dataclass
+class PreparedPlayerData:
+    """保存单个玩家的临时视图和 context 观测。
+
+    输入语义：``view`` 已完成死亡动作屏蔽与 best Global 选择；``observations`` 与
+    06b context 一一对应。
+    输出语义：供文件级 beta 拟合和最终逐行写回共同使用。
+    关键约束：view 只在 06c 内部使用，不会覆盖 05 输入 DataFrame 的原始字段。
+    """
+
+    player: str
+    view: pd.DataFrame
+    observations: list[ContextObservation]
+
+
+def validate_config(config: ContextStrategyPosteriorConfig) -> None:
+    """验证 06c 配置参数。
+
+    输入语义：config 是调用方构造的后验配置。
+    输出语义：参数合法时无返回；不合法时抛出 ValueError。
+    关键约束：beta 区间必须严格为正，posterior 阈值必须位于概率范围内。
+    """
+
+    if config.beta_min <= 0 or config.beta_max <= config.beta_min:
+        raise ValueError("beta 搜索范围必须满足 0 < beta_min < beta_max。")
+    if config.beta_grid_size < 3:
+        raise ValueError("beta_grid_size 至少为 3。")
+    if config.cv_folds < 2:
+        raise ValueError("cv_folds 至少为 2；trial 不足时流程会自动跳过或减少折数。")
+    if not 0 <= config.posterior_threshold <= 1:
+        raise ValueError("posterior_threshold 必须位于 [0, 1]。")
+    if config.bean_event_suppression_window < 0:
+        raise ValueError("bean_event_suppression_window 不能小于 0。")
+    if config.ghost_stay_suppression_window < 0:
+        raise ValueError("ghost_stay_suppression_window 不能小于 0。")
+    missing_codes = sorted(set(config.agents) - set(STRATEGY_NUMBER))
+    if missing_codes:
+        raise ValueError(f"策略缺少数字编码：{missing_codes}")
+
+
+def discover_posterior_players(data: pd.DataFrame, config: ContextStrategyPosteriorConfig) -> list[str]:
+    """识别拥有完整 06c 输入字段的玩家。
+
+    输入语义：data 是 05 cluster-global utility 表。
+    输出语义：返回 ``p1``、``p2`` 中字段完整的玩家列表；单人文件自然只返回 p1。
+    关键约束：某玩家只要出现部分信号字段就必须完整，否则立即报错，避免静默跳过坏数据。
+    """
+
+    players: list[str] = []
+    for player in PLAYER_PREFIXES:
+        signal_columns = {f"{player}_action_dir", f"{player}_available_dir"}
+        if signal_columns.isdisjoint(data.columns):
+            continue
+        required = {
+            "row_id",
+            "DayTrial",
+            f"{player}_action_dir",
+            f"{player}_available_dir",
+            f"{player}_global_Q_norm",
+            f"{player}_global_utility_k",
+            f"{player}_global_utility_k_norm",
+            f"{player}_global_utility_k_meta",
+        }
+        required.update(f"{player}_{agent}_Q" for agent in config.agents)
+        missing = sorted(required - set(data.columns))
+        if missing:
+            raise ValueError(f"{player} 06c 输入字段不完整，缺少：{missing}")
+        players.append(player)
+    if not players:
+        raise ValueError("没有找到可处理玩家，至少需要 p1_action_dir/p1_available_dir 和 raw Q 字段。")
+    return players
+
+
+def normalize_legal_q(values: Any) -> np.ndarray:
+    """只在合法有限方向上执行逐行 Min-Max 归一化。
+
+    输入语义：values 是长度为 4 的 raw Q；不可走方向应为 ``-inf``。
+    输出语义：有限方向落在 ``[0, 1]``，不可走方向保持 ``-inf``。
+    关键约束：所有合法方向相等时统一置 0，表示该策略在当前 tile 没有方向信息。
+    """
+
+    source = np.asarray(values, dtype=float)
+    if source.ndim != 1 or source.shape[0] != len(DIRECTION_NAMES):
+        raise ValueError(f"Q 必须是长度为 4 的一维数组，实际 shape={source.shape}")
+    if np.any(np.isposinf(source)) or np.any(np.isnan(source)):
+        raise ValueError(f"Q 中不允许出现 +inf 或 NaN：{source.tolist()}")
+
+    result = source.copy()
+    legal_mask = np.isfinite(source)
+    if not np.any(legal_mask):
+        raise ValueError("Q 的四个方向全部非法，无法计算动作概率。")
+    legal_values = source[legal_mask]
+    minimum = float(np.min(legal_values))
+    maximum = float(np.max(legal_values))
+    if maximum == minimum:
+        result[legal_mask] = 0.0
+    else:
+        result[legal_mask] = (legal_values - minimum) / (maximum - minimum)
+    return result
+
+
+def prepare_player_view(
+    data: pd.DataFrame,
+    player: str,
+    config: ContextStrategyPosteriorConfig,
+) -> pd.DataFrame:
+    """构造 06c context 划分和 best Global 选择所需的单玩家视图。
+
+    输入语义：data 已包含玩家私有事件列；player 指定当前玩家。
+    输出语义：返回保留全部前缀字段并新增通用 ``action_dir/available_dir/global_Q`` 的副本。
+    关键约束：死亡、不可用和缺失动作行会在 best Global 评分前被屏蔽，与 06b 保持一致。
+    """
+
+    view = data.copy(deep=True).reset_index(drop=True)
+    view["action_dir"] = view[f"{player}_action_dir"].apply(
+        lambda value: value if isinstance(value, str) else np.nan
+    )
+    view["available_dir"] = view[f"{player}_available_dir"].astype(bool)
+    alive_column = f"{player}_alive"
+    if alive_column in view.columns:
+        dead_mask = ~view[alive_column].astype(bool)
+        view.loc[dead_mask, "action_dir"] = np.nan
+        view.loc[dead_mask, "available_dir"] = False
+    invalid_mask = ~view["available_dir"]
+    view.loc[invalid_mask, "action_dir"] = np.nan
+
+    # apply_best_global_candidates 同时依赖无前缀和玩家前缀 Global 字段；这里只构造
+    # 临时别名，原始 05 DataFrame 不会被修改。
+    view["global_Q"] = copy.deepcopy(view[f"{player}_global_Q"])
+    view["global_Q_norm"] = copy.deepcopy(view[f"{player}_global_Q_norm"])
+    return view
+
+
+def build_context_observation(
+    view: pd.DataFrame,
+    player: str,
+    context: tuple[int, int],
+    is_stay: bool,
+    config: ContextStrategyPosteriorConfig,
+) -> ContextObservation:
+    """把一个 06b context 转换成后验模型可直接计算的观测对象。
+
+    输入语义：view 已选好 best Global；context 是全文件半开区间。
+    输出语义：返回有效动作、统一归一化 Q 和 null likelihood。
+    关键约束：七个策略在同一行必须具有完全相同的非法方向 mask；真实动作非法时
+    该行被排除，而不是强行赋予极小概率。
+    """
+
+    start, end = context
+    valid_rows: list[int] = []
+    actions: list[int] = []
+    q_rows: list[np.ndarray] = []
+    null_log_likelihood = 0.0
+
+    for row_index in range(start, end):
+        action = view.at[row_index, "action_dir"]
+        if not isinstance(action, str) or action not in DIRECTION_TO_INDEX:
+            continue
+
+        normalized_by_agent: list[np.ndarray] = []
+        legal_mask: np.ndarray | None = None
+        for agent in config.agents:
+            raw_q = view.at[row_index, "global_Q"] if agent == "global" else view.at[row_index, f"{player}_{agent}_Q"]
+            normalized = normalize_legal_q(raw_q)
+            current_mask = np.isfinite(normalized)
+            if legal_mask is None:
+                legal_mask = current_mask
+            elif not np.array_equal(legal_mask, current_mask):
+                raise ValueError(
+                    f"{player} row={row_index} 七策略非法方向 mask 不一致：agent={agent}"
+                )
+            normalized_by_agent.append(normalized)
+
+        action_index = DIRECTION_TO_INDEX[action]
+        assert legal_mask is not None
+        if not legal_mask[action_index]:
+            # 上游偶尔可能保留一个与地图不一致的动作；按方法定义不让它进入 likelihood。
+            continue
+        legal_count = int(np.sum(legal_mask))
+        valid_rows.append(row_index)
+        actions.append(action_index)
+        q_rows.append(np.stack(normalized_by_agent, axis=0))
+        null_log_likelihood -= math.log(legal_count)
+
+    if q_rows:
+        q_values = np.stack(q_rows, axis=0)
+    else:
+        q_values = np.empty((0, len(config.agents), len(DIRECTION_NAMES)), dtype=float)
+    trial_name = str(view.at[start, "DayTrial"])
+    return ContextObservation(
+        player=player,
+        trial_name=trial_name,
+        context=context,
+        is_stay=bool(is_stay or not actions),
+        row_indices=np.asarray(valid_rows, dtype=int),
+        action_indices=np.asarray(actions, dtype=int),
+        q_values=q_values,
+        null_log_likelihood=float(null_log_likelihood),
+    )
+
+
+def prepare_player_data(
+    data: pd.DataFrame,
+    player: str,
+    config: ContextStrategyPosteriorConfig,
+) -> PreparedPlayerData:
+    """为一个玩家完成 context 划分、best Global 选择和概率观测预计算。
+
+    输入语义：data 是已经追加私有事件列的 joint-state 表。
+    输出语义：返回临时玩家视图和按顺序排列的 ContextObservation。
+    关键约束：context 构造调用 06b 原函数；best Global 也调用 06b 原函数，确保规则一致。
+    """
+
+    view = prepare_player_view(data, player, config)
+    context_config = DynamicStrategyFittingConfig(
+        agents=config.agents,
+        stay_length=config.stay_length,
+        bean_event_suppression_window=config.bean_event_suppression_window,
+        ghost_stay_suppression_window=config.ghost_stay_suppression_window,
+    )
+    contexts, is_stay = build_event_context_segments(
+        view,
+        player,
+        context_config,
+    )
+    selected_view = apply_best_global_candidates(view, contexts, player)
+    observations = [
+        build_context_observation(selected_view, player, context, stay, config)
+        for context, stay in zip(contexts, is_stay)
+    ]
+    validate_context_coverage(observations, len(data), player)
+    return PreparedPlayerData(player=player, view=selected_view, observations=observations)
+
+
+def validate_context_coverage(
+    observations: list[ContextObservation],
+    row_count: int,
+    player: str,
+) -> None:
+    """验证一个玩家的 contexts 无重叠且完整覆盖所有 joint 行。
+
+    输入语义：observations 是按 06b context 生成的结果，row_count 是文件行数。
+    输出语义：覆盖正确时无返回；缺口、重叠或越界时抛出 RuntimeError。
+    关键约束：逐行写回依赖每行恰好属于一个 context，因此不能容忍部分结果。
+    """
+
+    coverage = np.zeros(row_count, dtype=int)
+    for observation in observations:
+        start, end = observation.context
+        if start < 0 or end > row_count or end <= start:
+            raise RuntimeError(f"{player} context 越界或为空：{observation.context}")
+        coverage[start:end] += 1
+    invalid = np.where(coverage != 1)[0]
+    if invalid.size:
+        raise RuntimeError(f"{player} context 未完整覆盖数据，异常行示例：{invalid[:10].tolist()}")
+
+
+def context_strategy_log_likelihood(observation: ContextObservation, beta: float) -> np.ndarray:
+    """计算一个 context 在给定 beta 下的七策略 log-likelihood。
+
+    输入语义：observation 已包含统一 Q 和真实方向；beta 必须为正数。
+    输出语义：返回长度为策略数的 log-likelihood 数组。
+    关键约束：使用 logsumexp 计算 softmax 分母，非法方向 ``-inf`` 自动不参与分母。
+    """
+
+    if beta <= 0:
+        raise ValueError("beta 必须大于 0。")
+    if observation.valid_action_count == 0:
+        return np.full(observation.q_values.shape[1], np.nan, dtype=float)
+
+    scaled = beta * observation.q_values
+    log_denominator = logsumexp(scaled, axis=2)
+    row_index = np.arange(observation.valid_action_count)[:, None]
+    agent_index = np.arange(observation.q_values.shape[1])[None, :]
+    action_index = np.broadcast_to(
+        observation.action_indices[:, None],
+        (observation.valid_action_count, observation.q_values.shape[1]),
+    )
+    true_scores = scaled[row_index, agent_index, action_index]
+    return np.sum(true_scores - log_denominator, axis=0)
+
+
+def context_marginal_nll(observation: ContextObservation, beta: float) -> float:
+    """计算潜在策略边际化后的单 context 负对数似然。
+
+    输入语义：observation 必须至少包含一个有效动作。
+    输出语义：返回均匀策略先验下的标量 NLL。
+    关键约束：七种策略是 context 的互斥潜在解释，不把 posterior 当作可加权 utility。
+    """
+
+    log_likelihood = context_strategy_log_likelihood(observation, beta)
+    if np.any(np.isnan(log_likelihood)):
+        raise ValueError("无有效动作的 context 不能进入 beta loss。")
+    return float(-(logsumexp(log_likelihood) - math.log(log_likelihood.size)))
+
+
+def total_context_nll(observations: Iterable[ContextObservation], beta: float) -> float:
+    """汇总一组 contexts 的边际负对数似然。
+
+    输入语义：observations 可以跨 trial，但应属于同一 beta 参数组。
+    输出语义：返回所有非 stay contexts 的 NLL 总和。
+    关键约束：无有效动作段直接跳过，不向 loss 添加任意常数。
+    """
+
+    effective = [item for item in observations if item.valid_action_count > 0]
+    if not effective:
+        return 0.0
+    return batch_total_context_nll(build_observation_batch(effective), beta)
+
+
+def build_observation_batch(observations: list[ContextObservation]) -> ObservationBatch:
+    """把有效 contexts 合并为一次向量化计算所需的批量数组。
+
+    输入语义：observations 中每个 context 都必须至少包含一个有效动作。
+    输出语义：返回拼接 Q、动作下标和 context 起点的 ObservationBatch。
+    关键约束：保持输入 context 顺序；后续 ``np.add.reduceat`` 依赖每段长度严格为正。
+    """
+
+    if not observations or any(item.valid_action_count <= 0 for item in observations):
+        raise ValueError("ObservationBatch 只能由非空且均含有效动作的 contexts 构造。")
+    lengths = np.asarray([item.valid_action_count for item in observations], dtype=int)
+    starts = np.concatenate(([0], np.cumsum(lengths)[:-1])).astype(int)
+    return ObservationBatch(
+        q_values=np.concatenate([item.q_values for item in observations], axis=0),
+        action_indices=np.concatenate([item.action_indices for item in observations], axis=0),
+        context_starts=starts,
+        context_count=len(observations),
+    )
+
+
+def batch_total_context_nll(batch: ObservationBatch, beta: float) -> float:
+    """向量化计算一组 contexts 的总边际 NLL。
+
+    输入语义：batch 已把所有有效动作连续拼接，beta 为正数。
+    输出语义：返回与逐 context 调用 ``context_marginal_nll`` 完全相同的 NLL 总和。
+    关键约束：先按动作计算每个策略 log 概率，再在 context 边界内求和，不能直接
+    在动作层面对策略做边际化，否则会改变“一段一个潜在策略”的模型假设。
+    """
+
+    if beta <= 0:
+        raise ValueError("beta 必须大于 0。")
+    scaled = beta * batch.q_values
+    log_denominator = logsumexp(scaled, axis=2)
+    row_index = np.arange(batch.action_indices.size)[:, None]
+    agent_index = np.arange(batch.q_values.shape[1])[None, :]
+    action_index = np.broadcast_to(
+        batch.action_indices[:, None],
+        (batch.action_indices.size, batch.q_values.shape[1]),
+    )
+    true_scores = scaled[row_index, agent_index, action_index]
+    action_log_probability = true_scores - log_denominator
+    context_log_likelihood = np.add.reduceat(
+        action_log_probability,
+        batch.context_starts,
+        axis=0,
+    )
+    if context_log_likelihood.shape[0] != batch.context_count:
+        raise RuntimeError("批量 context 聚合数量不一致。")
+    context_nll = -(logsumexp(context_log_likelihood, axis=1) - math.log(batch.q_values.shape[1]))
+    return float(np.sum(context_nll))
+
+
+def fit_beta(
+    observations: list[ContextObservation],
+    config: ContextStrategyPosteriorConfig,
+) -> BetaFitResult:
+    """使用对数网格与局部有界优化拟合一个 beta。
+
+    输入语义：observations 共享同一个 temperature，至少包含一个有效 context。
+    输出语义：返回搜索区间内 loss 最低的 beta 和 NLL。
+    关键约束：先做全区间网格可避免直接假定混合模型 loss 单峰，再只在最佳邻域精修。
+    """
+
+    effective = [item for item in observations if item.valid_action_count > 0]
+    if not effective:
+        raise ValueError("没有有效 context，无法拟合 beta。")
+    batch = build_observation_batch(effective)
+
+    eta_grid = np.linspace(math.log(config.beta_min), math.log(config.beta_max), config.beta_grid_size)
+
+    def objective(eta: float) -> float:
+        """把无约束 log-beta 转换为 beta 后计算总 NLL。"""
+
+        return batch_total_context_nll(batch, math.exp(float(eta)))
+
+    grid_losses = np.asarray([objective(eta) for eta in eta_grid], dtype=float)
+    best_index = int(np.argmin(grid_losses))
+    candidate_pairs: list[tuple[float, float]] = [(float(eta_grid[best_index]), float(grid_losses[best_index]))]
+
+    left_index = max(0, best_index - 1)
+    right_index = min(len(eta_grid) - 1, best_index + 1)
+    if right_index > left_index:
+        local_result = minimize_scalar(
+            objective,
+            bounds=(float(eta_grid[left_index]), float(eta_grid[right_index])),
+            method="bounded",
+            options={"xatol": 1e-8},
+        )
+        if local_result.success and np.isfinite(local_result.fun):
+            candidate_pairs.append((float(local_result.x), float(local_result.fun)))
+
+    best_eta, best_loss = min(candidate_pairs, key=lambda item: item[1])
+    return BetaFitResult(beta=float(math.exp(best_eta)), loss=float(best_loss))
+
+
+def calculate_bic(loss: float, parameter_count: int, context_count: int) -> float:
+    """按有效 player-context 数计算 BIC。
+
+    输入语义：loss 是最小 NLL，parameter_count 是 beta 数量，context_count 是有效段数。
+    输出语义：返回 ``2*NLL + m*log(C)``。
+    关键约束：context_count 必须大于 0；tile 不是本模型 likelihood 的独立分解单位。
+    """
+
+    if context_count <= 0:
+        raise ValueError("context_count 必须大于 0。")
+    return float(2.0 * loss + parameter_count * math.log(context_count))
+
+
+def build_grouped_folds(
+    observations: list[ContextObservation],
+    fold_count: int,
+    random_seed: int,
+) -> dict[str, int]:
+    """按完整 DayTrial 建立确定性的 grouped folds。
+
+    输入语义：observations 可以同时包含 P1/P2；相同 trial 名会自然归到同一 fold。
+    输出语义：返回 ``DayTrial -> fold_id`` 映射；trial 少于两组时返回空字典。
+    关键约束：不随机拆分 context 或 tile，避免相邻行为泄漏到验证集。
+    """
+
+    trial_names = sorted({item.trial_name for item in observations if item.valid_action_count > 0})
+    actual_folds = min(fold_count, len(trial_names))
+    if actual_folds < 2:
+        return {}
+    rng = np.random.default_rng(random_seed)
+    shuffled = list(rng.permutation(trial_names))
+    return {str(trial): index % actual_folds for index, trial in enumerate(shuffled)}
+
+
+def fit_full_beta_models(
+    observations_by_player: dict[str, list[ContextObservation]],
+    config: ContextStrategyPosteriorConfig,
+) -> dict[str, Any]:
+    """拟合文件级共享和玩家独立 beta，并使用 BIC 选择最终结构。
+
+    输入语义：字典包含文件内实际存在玩家的全部 contexts。
+    输出语义：返回完整模型拟合、BIC、最终模型名和每个玩家采用的 beta。
+    关键约束：单人文件没有“共享/独立”之分，直接使用一个 beta 并标记为 single。
+    """
+
+    effective_by_player = {
+        player: [item for item in observations if item.valid_action_count > 0]
+        for player, observations in observations_by_player.items()
+    }
+    all_effective = [item for observations in effective_by_player.values() for item in observations]
+    if not all_effective:
+        raise ValueError("文件中没有任何可拟合 player-context。")
+
+    shared_fit = fit_beta(all_effective, config)
+    context_count = len(all_effective)
+    shared_bic = calculate_bic(shared_fit.loss, 1, context_count)
+
+    if len(effective_by_player) == 1:
+        only_player = next(iter(effective_by_player))
+        return {
+            "selected_model": "single",
+            "beta_by_player": {only_player: shared_fit.beta},
+            "shared_beta": shared_fit.beta,
+            "shared_loss": shared_fit.loss,
+            "shared_bic": shared_bic,
+            "separate_beta": None,
+            "separate_loss": None,
+            "separate_bic": None,
+            "effective_context_count": context_count,
+        }
+
+    separate_fits = {
+        player: fit_beta(observations, config)
+        for player, observations in effective_by_player.items()
+    }
+    separate_loss = float(sum(item.loss for item in separate_fits.values()))
+    separate_bic = calculate_bic(separate_loss, len(separate_fits), context_count)
+    if shared_bic <= separate_bic:
+        selected_model = "shared"
+        beta_by_player = {player: shared_fit.beta for player in effective_by_player}
+    else:
+        selected_model = "separate"
+        beta_by_player = {player: item.beta for player, item in separate_fits.items()}
+
+    return {
+        "selected_model": selected_model,
+        "beta_by_player": beta_by_player,
+        "shared_beta": shared_fit.beta,
+        "shared_loss": shared_fit.loss,
+        "shared_bic": shared_bic,
+        "separate_beta": {player: item.beta for player, item in separate_fits.items()},
+        "separate_loss": separate_loss,
+        "separate_bic": separate_bic,
+        "effective_context_count": context_count,
+    }
+
+
+def run_grouped_cross_validation(
+    observations_by_player: dict[str, list[ContextObservation]],
+    config: ContextStrategyPosteriorConfig,
+) -> dict[str, Any]:
+    """在文件内按 DayTrial 评估共享和独立 beta 的稳定性。
+
+    输入语义：observations_by_player 是完整文件数据；配置给出最大折数和 seed。
+    输出语义：返回 trial-fold 映射和每折训练 beta、BIC 选择、held-out NLL。
+    关键约束：交叉验证仅是诊断；最终参数仍由全文件拟合和全文件 BIC 决定。
+    """
+
+    all_observations = [item for values in observations_by_player.values() for item in values]
+    trial_to_fold = build_grouped_folds(all_observations, config.cv_folds, config.random_seed)
+    if not trial_to_fold:
+        return {"fold_count": 0, "trial_to_fold": {}, "folds": []}
+
+    fold_results: list[dict[str, Any]] = []
+    for fold_id in sorted(set(trial_to_fold.values())):
+        train_by_player = {
+            player: [
+                item
+                for item in observations
+                if item.valid_action_count > 0 and trial_to_fold[item.trial_name] != fold_id
+            ]
+            for player, observations in observations_by_player.items()
+        }
+        validation_by_player = {
+            player: [
+                item
+                for item in observations
+                if item.valid_action_count > 0 and trial_to_fold[item.trial_name] == fold_id
+            ]
+            for player, observations in observations_by_player.items()
+        }
+        # 若极小数据在某折造成玩家训练集为空，则跳过该折而不是构造无依据 beta。
+        if any(not values for values in train_by_player.values()):
+            continue
+
+        train_model = fit_full_beta_models(train_by_player, config)
+        shared_validation_nll = float(
+            sum(
+                total_context_nll(values, train_model["shared_beta"])
+                for values in validation_by_player.values()
+            )
+        )
+        separate_validation_nll: float | None = None
+        if train_model["separate_beta"] is not None:
+            separate_validation_nll = float(
+                sum(
+                    total_context_nll(validation_by_player[player], beta)
+                    for player, beta in train_model["separate_beta"].items()
+                )
+            )
+        fold_results.append(
+            {
+                "fold_id": int(fold_id),
+                "validation_trials": sorted(
+                    trial for trial, assigned_fold in trial_to_fold.items() if assigned_fold == fold_id
+                ),
+                "train_context_count": int(train_model["effective_context_count"]),
+                "validation_context_count": int(sum(len(values) for values in validation_by_player.values())),
+                "shared_beta": float(train_model["shared_beta"]),
+                "shared_bic": float(train_model["shared_bic"]),
+                "shared_validation_nll": shared_validation_nll,
+                "separate_beta": train_model["separate_beta"],
+                "separate_bic": train_model["separate_bic"],
+                "separate_validation_nll": separate_validation_nll,
+                "training_bic_selected_model": train_model["selected_model"],
+            }
+        )
+    return {
+        "fold_count": len(set(trial_to_fold.values())),
+        "trial_to_fold": trial_to_fold,
+        "folds": fold_results,
+    }
+
+
+def posterior_from_log_likelihood(log_likelihood: np.ndarray) -> np.ndarray:
+    """把均匀策略先验下的 log-likelihood 转换为 posterior。
+
+    输入语义：log_likelihood 是长度为策略数的有限数组。
+    输出语义：返回总和为 1 的 posterior 数组。
+    关键约束：使用 logsumexp 保证长 context 下不会因概率连乘发生下溢。
+    """
+
+    values = np.asarray(log_likelihood, dtype=float)
+    if values.ndim != 1 or values.size == 0 or not np.all(np.isfinite(values)):
+        raise ValueError(f"策略 log-likelihood 必须是一维有限数组：{values}")
+    return np.exp(values - logsumexp(values))
+
+
+def initialize_player_output(index: pd.Index, player: str) -> pd.DataFrame:
+    """创建 06c 玩家级逐行输出空表。
+
+    输入语义：index 与 joint-state 输入表一致。
+    输出语义：返回所有 posterior 和 best Global 字段均为 object dtype 的 DataFrame。
+    关键约束：复杂列表、tuple、字典不能让 pandas 自动展开为多列。
+    """
+
+    columns = (
+        "selected_global_Q",
+        "best_global_cluster_id",
+        "best_global_cluster_prob_accuracy",
+        "best_global_cluster_set_accuracy",
+        "best_global_cluster_meta",
+        "trial_context",
+        "strategy_log_likelihood",
+        "strategy_posterior",
+        "strategy_posterior_max",
+        "strategy_candidate",
+        "strategy",
+        "strategy_name",
+        "null_log_likelihood",
+        "log_likelihood_gain",
+        "valid_action_count",
+        "is_stay",
+        "is_vague",
+    )
+    output = pd.DataFrame(index=index)
+    for column in columns:
+        output[f"{player}_{column}"] = pd.Series([np.nan] * len(index), index=index, dtype=object)
+    return output
+
+
+def write_player_posterior(
+    prepared: PreparedPlayerData,
+    beta: float,
+    config: ContextStrategyPosteriorConfig,
+) -> pd.DataFrame:
+    """使用最终 beta 计算并逐行写回一个玩家的 context 后验。
+
+    输入语义：prepared 保存选好 Global 的视图；beta 已由文件级 BIC 模型确定。
+    输出语义：返回与 joint-state 等长的玩家前缀结果列。
+    关键约束：同一 context 的 likelihood/posterior 完全相同；selected_global_Q 仍逐行
+    保存，因为资源变化后同一目标 cluster 的方向 utility 会随位置改变。
+    """
+
+    output = initialize_player_output(prepared.view.index, prepared.player)
+    player = prepared.player
+    for observation in prepared.observations:
+        start, end = observation.context
+        labels = list(range(start, end))
+        selected_q = [copy.deepcopy(prepared.view.at[index, "global_Q"]) for index in labels]
+        output.loc[labels, f"{player}_selected_global_Q"] = pd.Series(selected_q, index=labels, dtype=object)
+        for source, target in (
+            ("best_global_cluster_id", "best_global_cluster_id"),
+            ("best_global_cluster_prob_accuracy", "best_global_cluster_prob_accuracy"),
+            ("best_global_cluster_set_accuracy", "best_global_cluster_set_accuracy"),
+            ("best_global_cluster_meta", "best_global_cluster_meta"),
+        ):
+            values = [copy.deepcopy(prepared.view.at[index, source]) for index in labels]
+            output.loc[labels, f"{player}_{target}"] = pd.Series(values, index=labels, dtype=object)
+
+        if observation.valid_action_count == 0:
+            log_likelihood = [float("nan")] * len(config.agents)
+            posterior = [float("nan")] * len(config.agents)
+            posterior_max = float("nan")
+            candidate = "stay"
+            strategy_name = "stay"
+            is_vague = False
+            null_likelihood = float("nan")
+            gain = float("nan")
+        else:
+            log_likelihood_array = context_strategy_log_likelihood(observation, beta)
+            posterior_array = posterior_from_log_likelihood(log_likelihood_array)
+            candidate_index = int(np.argmax(posterior_array))
+            candidate = config.agents[candidate_index]
+            posterior_max = float(posterior_array[candidate_index])
+            is_vague = posterior_max < config.posterior_threshold
+            strategy_name = "vague" if is_vague else candidate
+            log_likelihood = log_likelihood_array.tolist()
+            posterior = posterior_array.tolist()
+            null_likelihood = observation.null_log_likelihood
+            gain = float(
+                (float(np.max(log_likelihood_array)) - null_likelihood) / observation.valid_action_count
+            )
+
+        repeated_values: dict[str, Any] = {
+            "trial_context": observation.context,
+            "strategy_log_likelihood": log_likelihood,
+            "strategy_posterior": posterior,
+            "strategy_posterior_max": posterior_max,
+            "strategy_candidate": candidate,
+            "strategy": STRATEGY_NUMBER[strategy_name],
+            "strategy_name": strategy_name,
+            "null_log_likelihood": null_likelihood,
+            "log_likelihood_gain": gain,
+            "valid_action_count": observation.valid_action_count,
+            "is_stay": observation.valid_action_count == 0,
+            "is_vague": is_vague,
+        }
+        for name, value in repeated_values.items():
+            output.loc[labels, f"{player}_{name}"] = pd.Series(
+                [copy.deepcopy(value) for _ in labels],
+                index=labels,
+                dtype=object,
+            )
+    return output
+
+
+def validate_row_id(data: pd.DataFrame) -> None:
+    """验证 row_id 与重置后的 DataFrame 标签一一对应。
+
+    输入语义：data 是 05 单文件表。
+    输出语义：一致时无返回；否则抛错。
+    关键约束：06b context 使用 row_id 作为全文件 offset，错位会导致跨 trial 写回错误。
+    """
+
+    if "row_id" not in data.columns:
+        raise ValueError("06c 输入缺少 row_id。")
+    row_id = pd.to_numeric(data["row_id"], errors="raise").to_numpy(dtype=int)
+    expected = np.arange(len(data), dtype=int)
+    if not np.array_equal(row_id, expected):
+        raise ValueError("06c 要求 row_id 从 0 连续递增并与 DataFrame 行标签一致。")
+
+
+def fit_context_strategy_posterior_dataframe(
+    raw_data: pd.DataFrame,
+    config: ContextStrategyPosteriorConfig | None = None,
+) -> pd.DataFrame:
+    """对一个 joint-state 文件执行完整 06c 后验拟合。
+
+    输入语义：raw_data 是 05 cluster-global utility 输出。
+    输出语义：返回保留原字段并追加 P1/P2 posterior、strategy 和模型 attrs 的 DataFrame。
+    关键约束：每个文件单独拟合 beta；P1/P2 是否共享由当前文件全数据 BIC 决定。
+    """
+
+    config = ContextStrategyPosteriorConfig() if config is None else config
+    validate_config(config)
+    base = raw_data.reset_index(drop=True).copy(deep=True)
+    validate_row_id(base)
+    players = discover_posterior_players(base, config)
+    result = append_player_event_columns(base, players)
+
+    prepared_by_player = {
+        player: prepare_player_data(result, player, config)
+        for player in players
+    }
+    observations_by_player = {
+        player: prepared.observations
+        for player, prepared in prepared_by_player.items()
+    }
+    full_model = fit_full_beta_models(observations_by_player, config)
+    cross_validation = run_grouped_cross_validation(observations_by_player, config)
+
+    for player, prepared in prepared_by_player.items():
+        player_output = write_player_posterior(prepared, full_model["beta_by_player"][player], config)
+        for column in player_output.columns:
+            result[column] = player_output[column].to_numpy()
+
+    # DataFrame.attrs 会随 pickle 保存；这里集中记录文件级参数，避免在每一行重复大段
+    # CV 信息。global_selection_uses_context_actions 显式提醒后续分析其乐观偏差来源。
+    result.attrs = copy.deepcopy(raw_data.attrs)
+    result.attrs["context_strategy_posterior_model"] = {
+        "version": "06c-v1",
+        "strategy_order": list(config.agents),
+        "strategy_number": {name: STRATEGY_NUMBER[name] for name in config.agents},
+        "normalization": "per_player_tile_strategy_legal_direction_minmax_from_raw_q",
+        "bean_event_suppression_window": config.bean_event_suppression_window,
+        "ghost_stay_suppression_window": config.ghost_stay_suppression_window,
+        "strategy_prior": "uniform",
+        "posterior_threshold": config.posterior_threshold,
+        "global_selection_rule": "06b_context_probability_accuracy",
+        "global_selection_uses_context_actions": True,
+        "selected_beta_model": full_model["selected_model"],
+        "beta_by_player": full_model["beta_by_player"],
+        "shared_beta": full_model["shared_beta"],
+        "shared_loss": full_model["shared_loss"],
+        "shared_bic": full_model["shared_bic"],
+        "separate_beta": full_model["separate_beta"],
+        "separate_loss": full_model["separate_loss"],
+        "separate_bic": full_model["separate_bic"],
+        "effective_context_count": full_model["effective_context_count"],
+        "valid_action_count_by_player": {
+            player: int(sum(item.valid_action_count for item in prepared.observations))
+            for player, prepared in prepared_by_player.items()
+        },
+        "cross_validation": cross_validation,
+    }
+    return result
+
+
+def process_context_strategy_posterior_file(
+    input_path: str | Path,
+    output_path: str | Path,
+    config: ContextStrategyPosteriorConfig | None = None,
+    file_index: int = 0,
+) -> dict[str, Any]:
+    """处理并保存一个 05 utility 文件。
+
+    输入语义：input_path/output_path 是对应的嵌套 pickle 路径；file_index 派生 CV seed。
+    输出语义：保存 06c DataFrame，并返回便于 CLI 汇总的轻量摘要。
+    关键约束：输出目录可与旧 06 并存，绝不覆盖 06b 默认目录。
+    """
+
+    base_config = ContextStrategyPosteriorConfig() if config is None else config
+    file_config = ContextStrategyPosteriorConfig(
+        agents=base_config.agents,
+        stay_length=base_config.stay_length,
+        bean_event_suppression_window=base_config.bean_event_suppression_window,
+        ghost_stay_suppression_window=base_config.ghost_stay_suppression_window,
+        beta_min=base_config.beta_min,
+        beta_max=base_config.beta_max,
+        beta_grid_size=base_config.beta_grid_size,
+        cv_folds=base_config.cv_folds,
+        posterior_threshold=base_config.posterior_threshold,
+        random_seed=base_config.random_seed + file_index,
+    )
+    input_file = Path(input_path)
+    output_file = Path(output_path)
+    with input_file.open("rb") as file:
+        raw_data = pickle.load(file)
+    result = fit_context_strategy_posterior_dataframe(raw_data, file_config)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    result.to_pickle(output_file)
+    model = result.attrs["context_strategy_posterior_model"]
+    return {
+        "input_file": str(input_file),
+        "output_file": str(output_file),
+        "rows": int(len(result)),
+        "players": sorted(model["beta_by_player"]),
+        "selected_beta_model": model["selected_beta_model"],
+        "beta_by_player": model["beta_by_player"],
+        "shared_bic": model["shared_bic"],
+        "separate_bic": model["separate_bic"],
+    }
+
+
+def process_context_strategy_posterior_directory(
+    input_dir: str | Path,
+    output_dir: str | Path,
+    config: ContextStrategyPosteriorConfig | None = None,
+    workers: int = 1,
+) -> list[dict[str, Any]]:
+    """按嵌套任务目录批量执行 06c。
+
+    输入语义：input_dir 包含 ``comp/*.pkl``、``coop/*.pkl``，workers 控制文件级进程数。
+    输出语义：保持相对目录结构保存并返回所有文件摘要。
+    关键约束：文件之间没有参数共享，因此文件级并行不改变统计结果。
+    """
+
+    config = ContextStrategyPosteriorConfig() if config is None else config
+    input_root = Path(input_dir)
+    output_root = Path(output_dir)
+    input_files = sorted(path for path in input_root.glob("*/*.pkl") if path.is_file())
+    if not input_files:
+        raise FileNotFoundError(f"输入目录中没有嵌套 pickle 文件：{input_root}")
+    tasks = [
+        (
+            input_file,
+            output_root / input_file.relative_to(input_root),
+            config,
+            file_index,
+        )
+        for file_index, input_file in enumerate(input_files)
+    ]
+    if workers <= 1:
+        return [_process_posterior_task(task) for task in tasks]
+    with ProcessPoolExecutor(max_workers=min(workers, len(tasks))) as executor:
+        return list(executor.map(_process_posterior_task, tasks))
+
+
+def _process_posterior_task(
+    task: tuple[Path, Path, ContextStrategyPosteriorConfig, int],
+) -> dict[str, Any]:
+    """执行目录级进程池中的单文件 06c 任务。"""
+
+    input_path, output_path, config, file_index = task
+    return process_context_strategy_posterior_file(
+        input_path,
+        output_path,
+        config,
+        file_index=file_index,
+    )

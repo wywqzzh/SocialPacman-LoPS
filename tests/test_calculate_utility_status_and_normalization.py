@@ -112,6 +112,39 @@ class CalculateUtilityStatusAndNormalizationTests(unittest.TestCase):
 
         self.assertEqual(UtilityConfig().approach_depth, 20)
 
+    def test_default_approach_discount_factor_is_point_nine_five(self) -> None:
+        """验证正式 Approach 最佳命中路径使用较缓的 0.95 距离衰减。"""
+
+        self.assertEqual(UtilityConfig().approach_discount_factor, 0.95)
+
+    def test_real_p1_approach_prefers_distance_reducing_actions(self) -> None:
+        """验证 P1 追第二只 scared ghost 时，最佳衰减路径修复四个旧误判帧。
+
+        输入语义：读取 03-01 中旧路径均值曾误判的 0-based 帧 23、25、26、29。
+        输出语义：每帧真实动作的 Approach Q 都严格高于旧误判方向。
+        关键约束：该回归同时约束距离衰减和最大叶聚合；若恢复路径均值，至少一个断言
+        会失败。frame_id 用于跨整个 04 文件稳定定位对应 tile。
+        """
+
+        checks = (
+            (6165, 2, 3),
+            (6200, 0, 3),
+            (6214, 0, 1),
+            (6251, 0, 3),
+        )
+        for frame_id, actual_direction, old_prediction in checks:
+            utility = self._estimate_real_player_frame(
+                player="p1",
+                trial="03-01-10001-10022-2025-07-15-JJJ",
+                frame_id=frame_id,
+            )
+            approach_q = np.asarray(utility.at[0, "approach_Q"], dtype=float)
+            self.assertGreater(
+                approach_q[actual_direction],
+                approach_q[old_prediction],
+                msg=f"frame_id={frame_id} Approach 仍偏向旧误判方向",
+            )
+
     def test_default_local_discount_factor_is_point_nine(self) -> None:
         """验证 Local 最佳路径默认使用0.90逐步奖励衰减。
 

@@ -231,11 +231,53 @@ class ContextStrategyPosteriorTests(unittest.TestCase):
         )
         actual = context_strategy_log_likelihood(observation, beta=2.0)
         expected_preference = 2.0 - np.log(np.exp(2.0) + 1.0)
-        np.testing.assert_allclose(actual, [expected_preference, -math.log(2)])
+        expected_no_information = -math.log(2) - 2.0
+        np.testing.assert_allclose(actual, [expected_preference, expected_no_information])
 
         posterior = posterior_from_log_likelihood(actual)
         self.assertAlmostEqual(float(np.sum(posterior)), 1.0)
         self.assertGreater(posterior[0], posterior[1])
+
+    def test_no_information_penalty_does_not_depend_on_beta(self) -> None:
+        """验证全零 Q 使用固定额外损失，而不是随 beta 变化的伪错误方向。
+
+        输入语义：构造一个具有两个合法方向的全零策略，并用两个不同 beta 计算。
+        输出语义：两次 log-likelihood 都等于 ``-log(2)-2``。
+        关键约束：固定惩罚只作用于多于一个合法方向的无信息行。
+        """
+
+        observation = ContextObservation(
+            player="p1",
+            trial_name="01-01-test",
+            context=(0, 1),
+            is_stay=False,
+            row_indices=np.asarray([0]),
+            action_indices=np.asarray([0]),
+            q_values=np.asarray([[[0.0, 0.0, -np.inf, -np.inf]]]),
+            null_log_likelihood=-math.log(2),
+        )
+
+        low_beta = context_strategy_log_likelihood(observation, beta=0.2)
+        high_beta = context_strategy_log_likelihood(observation, beta=8.0)
+        np.testing.assert_allclose(low_beta, [-math.log(2)-2.0])
+        np.testing.assert_allclose(high_beta, low_beta)
+
+    def test_single_legal_direction_is_not_penalized_as_no_information(self) -> None:
+        """验证只有一个合法动作时，即使 Q 无差异也保持零损失。"""
+
+        observation = ContextObservation(
+            player="p1",
+            trial_name="01-01-test",
+            context=(0, 1),
+            is_stay=False,
+            row_indices=np.asarray([0]),
+            action_indices=np.asarray([0]),
+            q_values=np.asarray([[[0.0, -np.inf, -np.inf, -np.inf]]]),
+            null_log_likelihood=0.0,
+        )
+
+        actual = context_strategy_log_likelihood(observation, beta=2.0)
+        np.testing.assert_allclose(actual, [0.0])
 
     def test_low_information_strategy_is_gated_without_null_competition(self) -> None:
         """验证少数命中不能让大部分时间无信息的策略获得虚高 posterior。

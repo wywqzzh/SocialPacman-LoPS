@@ -59,8 +59,9 @@ class UtilityConfig:
     使更直接到达的最佳路径优于绕路后汇合到同一资源的路径。
     Evade 默认只搜索 6 步，把它限定为对近距离正常 ghost 的即时躲避策略，避免把
     7--10 步外、恰好与资源目标反向的远处 ghost 误解释成主动躲避目标。
-    Approach 默认搜索 20 步，用于表达玩家在 energizer 后跨较长地图距离追逐 scared
-    ghost 的行为；该范围明显长于 Evade，二者分别对应远程追逐和近程避险。
+    Approach 默认搜索 20 步，并使用 0.95 的命中奖励衰减后选择最佳路径，用于表达
+    玩家在 energizer 后跨较长地图距离追逐 scared ghost 的行为；该范围明显长于
+    Evade，二者分别对应远程追逐和近程避险。
     """
 
     randomness_coeff: float = 0.0
@@ -77,6 +78,7 @@ class UtilityConfig:
     evade_ghost_attractive_thr: int = 0
     evade_ghost_repulsive_thr: int = 0
     approach_depth: int = 20
+    approach_discount_factor: float = 0.95
     approach_ghost_attractive_thr: int = 0
     approach_ghost_repulsive_thr: int = 0
     energizer_depth: int = 10

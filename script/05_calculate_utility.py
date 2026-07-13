@@ -94,6 +94,12 @@ def parse_args() -> argparse.Namespace:
         default=20,
         help="Approach 路径树深度；默认允许20步范围内的远程追鬼行为提供方向证据。",
     )
+    parser.add_argument(
+        "--approach-discount-factor",
+        type=float,
+        default=0.95,
+        help="Approach 最佳命中路径的距离衰减因子 gamma；较缓衰减保留远程追鬼证据。",
+    )
     parser.add_argument("--energizer-depth", type=int, default=10, help="Energizer 路径树深度。")
     parser.add_argument("--no-energizer-depth", type=int, default=8, help="NoEnergizer 路径树深度。")
     parser.add_argument(
@@ -122,6 +128,7 @@ def build_config(args: argparse.Namespace) -> CalculateUtilityConfig:
         local_discount_factor=args.local_discount_factor,
         evade_depth=args.evade_depth,
         approach_depth=args.approach_depth,
+        approach_discount_factor=args.approach_discount_factor,
         energizer_depth=args.energizer_depth,
         no_energizer_depth=args.no_energizer_depth,
     )

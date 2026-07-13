@@ -58,6 +58,8 @@ PLAYER_REVISED_COLUMNS = (
 VAGUE_REVISE_MIN_ACCURACY = 0.70
 LOW_EVIDENCE_MIN_EFFECTIVE_ACTION_RATIO = 0.5
 SCARED_GHOST_STATUS_MIN = 4
+DEFAULT_REVISION_RELATIVE_ACCURACY_THRESHOLD = 0.8
+ENERGIZER_FOLLOWUP_APPROACH_RELATIVE_ACCURACY_THRESHOLD = 0.75
 
 
 @dataclass
@@ -604,12 +606,17 @@ def revise_function(
     contexts: list[tuple[int, int]],
     revise_weight: list[int],
     main_agent: int,
+    relative_accuracy_threshold: float = DEFAULT_REVISION_RELATIVE_ACCURACY_THRESHOLD,
+    include_relative_threshold: bool = False,
 ) -> None:
     """按指定主 agent 修正一组段落。
 
-    输入语义：contexts 是半开区间列表，revise_weight 是目标 one-hot 权重。
+    输入语义：contexts 是半开区间列表，revise_weight 是目标 one-hot 权重；
+    relative_accuracy_threshold 控制主策略相对最佳策略的最低比例，布尔参数指定边界
+    是否允许等号。
     输出语义：满足准确率阈值的段落会被写回目标权重。
-    关键约束：阈值 `main/max > 0.8 且 main > 0.6` 保留旧规则。
+    关键约束：默认仍保留旧规则 ``main/max > 0.8 且 main > 0.6``。只有调用方显式
+    覆盖阈值和等号语义时才改变，避免 Approach 调整连带影响 Energizer 等其它规则。
     """
 
     for prev, end in contexts:
@@ -623,7 +630,13 @@ def revise_function(
         # 说明当前段落没有任何策略提供有效方向证据，不能仅凭事件标签强行改写。
         if max_accuracy <= 0:
             continue
-        if main_agent_accuracy / max_accuracy > 0.8 and main_agent_accuracy > 0.6:
+        relative_accuracy = main_agent_accuracy / max_accuracy
+        relative_passed = (
+            relative_accuracy >= relative_accuracy_threshold
+            if include_relative_threshold
+            else relative_accuracy > relative_accuracy_threshold
+        )
+        if relative_passed and main_agent_accuracy > 0.6:
             apply_revised_weight(data, prev, end, context, revise_weight, update_predict_dir=True)
 
 
@@ -875,7 +888,16 @@ def process_trial(data: pd.DataFrame, input_path: Path, trial_name: str, scared_
 
     revise_weight = [0] * len(AGENTS)
     revise_weight[AGENT_INDEX["approach"]] = 1
-    revise_function(data, eat_energizer_next_context, revise_weight, AGENT_INDEX["approach"])
+    # Energizer 后第一段允许 Approach 达到最佳单策略准确率的 75% 即触发，并包含
+    # 恰好 0.75 的边界。其它 revise_function 调用仍使用严格大于 0.8 的旧阈值。
+    revise_function(
+        data,
+        eat_energizer_next_context,
+        revise_weight,
+        AGENT_INDEX["approach"],
+        relative_accuracy_threshold=ENERGIZER_FOLLOWUP_APPROACH_RELATIVE_ACCURACY_THRESHOLD,
+        include_relative_threshold=True,
+    )
     recompute_strategy(data, str(input_path), trial_name)
 
     for eat_index_position, eat_index in enumerate(eat_energizer):

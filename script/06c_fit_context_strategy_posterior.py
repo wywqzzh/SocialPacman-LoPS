@@ -71,6 +71,12 @@ def parse_args() -> argparse.Namespace:
         default=1e-12,
         help="判断归一化 Q 是否具有方向差异时使用的浮点容差。",
     )
+    parser.add_argument(
+        "--no-information-penalty",
+        type=float,
+        default=2.0,
+        help="合法方向 Q 全相等时，在均匀动作 log-likelihood 上增加的固定损失。",
+    )
     parser.add_argument("--random-seed", type=int, default=20260610)
     return parser.parse_args()
 
@@ -111,6 +117,7 @@ def build_config(args: argparse.Namespace) -> ContextStrategyPosteriorConfig:
         posterior_threshold=args.posterior_threshold,
         min_information_coverage=args.min_information_coverage,
         information_epsilon=args.information_epsilon,
+        no_information_penalty=args.no_information_penalty,
         random_seed=args.random_seed,
     )
 

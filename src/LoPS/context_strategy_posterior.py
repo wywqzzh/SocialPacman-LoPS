@@ -3,8 +3,9 @@
 本模块复用 06b 已验证的玩家私有事件和 context 划分，再把每段 GA 权重拟合替换为
 概率模型：先按 06b 规则选择解释动作最好的 Global cluster，随后统一归一化七种
 策略的 raw Q，通过 softmax 得到动作概率。context 内信息覆盖率不足的策略先被
-排除，posterior 和文件级 temperature 只使用覆盖率合格的行为策略。合法方向均匀
-分布的 Null 仅作为诊断基线，避免它否决覆盖充分但偶有高置信度错误的行为策略。
+排除，posterior 和文件级 temperature 只使用覆盖率合格的行为策略。策略在某行的
+合法方向 Q 全相等时，使用独立于 beta 的固定无信息惩罚，避免无信息均匀预测比
+明确错误获得过多优势。合法方向均匀分布的 Null 仍只作为诊断基线。
 
 06c 与 06b 完全隔离。输入和输出仍是一份 P1/P2 时间对齐的 joint-state DataFrame，
 但 06c 不生成具有旧 GA 语义的 weight 字段。
@@ -70,6 +71,7 @@ class ContextStrategyPosteriorConfig:
     posterior_threshold: float = 0.70
     min_information_coverage: float = 0.50
     information_epsilon: float = 1e-12
+    no_information_penalty: float = 2.0
     random_seed: int = 20260610
 
 
@@ -194,6 +196,8 @@ def validate_config(config: ContextStrategyPosteriorConfig) -> None:
         raise ValueError("min_information_coverage 必须位于 [0, 1]。")
     if config.information_epsilon < 0:
         raise ValueError("information_epsilon 不能小于 0。")
+    if config.no_information_penalty < 0:
+        raise ValueError("no_information_penalty 不能小于 0。")
     if config.bean_event_suppression_window < 0:
         raise ValueError("bean_event_suppression_window 不能小于 0。")
     if config.ghost_stay_suppression_window < 0:
@@ -454,10 +458,70 @@ def validate_context_coverage(
         raise RuntimeError(f"{player} context 未完整覆盖数据，异常行示例：{invalid[:10].tolist()}")
 
 
-def context_strategy_log_likelihood(observation: ContextObservation, beta: float) -> np.ndarray:
+def action_log_probability_with_no_information_penalty(
+    q_values: np.ndarray,
+    action_indices: np.ndarray,
+    beta: float,
+    no_information_penalty: float = 2.0,
+    information_epsilon: float = 1e-12,
+) -> np.ndarray:
+    """计算动作 log probability，并对无信息策略行施加固定额外惩罚。
+
+    输入语义：q_values 形状为 ``动作数×策略数×4``，已经按合法方向 Min-Max；
+    action_indices 与动作轴对齐；beta 只控制有信息行的 softmax；固定惩罚和 epsilon
+    分别控制无信息损失与浮点判定。
+    输出语义：返回 ``动作数×策略数`` 的真实动作 log probability。
+    关键约束：合法方向 Q 极差不超过 epsilon 且合法方向数大于 1 时，使用
+    ``-log(合法方向数)-no_information_penalty``；该值不依赖 beta。只有一个合法方向
+    时玩家没有选择空间，保留普通 softmax 的 0 损失。墙方向 ``-inf`` 不参与极差。
+    """
+
+    values = np.asarray(q_values, dtype=float)
+    actions = np.asarray(action_indices, dtype=int)
+    if values.ndim != 3 or values.shape[2] != len(DIRECTION_NAMES):
+        raise ValueError(f"批量 Q 必须为 n×k×4，实际 shape={values.shape}")
+    if actions.ndim != 1 or actions.shape[0] != values.shape[0]:
+        raise ValueError(f"动作下标必须与 Q 动作轴对齐：{actions.shape} != {values.shape[0]}")
+    if beta <= 0:
+        raise ValueError("beta 必须大于 0。")
+    if no_information_penalty < 0:
+        raise ValueError("no_information_penalty 不能小于 0。")
+    if information_epsilon < 0:
+        raise ValueError("information_epsilon 不能小于 0。")
+
+    scaled = beta * values
+    log_denominator = logsumexp(scaled, axis=2)
+    row_index = np.arange(actions.size)[:, None]
+    agent_index = np.arange(values.shape[1])[None, :]
+    action_index = np.broadcast_to(actions[:, None], (actions.size, values.shape[1]))
+    true_scores = scaled[row_index, agent_index, action_index]
+    action_log_probability = true_scores - log_denominator
+
+    finite_mask = np.isfinite(values)
+    legal_count = np.sum(finite_mask, axis=2)
+    finite_min = np.min(np.where(finite_mask, values, np.inf), axis=2)
+    finite_max = np.max(np.where(finite_mask, values, -np.inf), axis=2)
+    no_information = (
+        (finite_max - finite_min <= float(information_epsilon))
+        & (legal_count > 1)
+    )
+    # 固定惩罚是在均匀动作损失上增加一个与 beta 无关的常数。它既把无信息视为
+    # 解释失败，又保留有限 likelihood，避免单个无信息 tile 让整个 context 变成 -inf。
+    fixed_log_probability = -np.log(legal_count) - float(no_information_penalty)
+    action_log_probability[no_information] = fixed_log_probability[no_information]
+    return action_log_probability
+
+
+def context_strategy_log_likelihood(
+    observation: ContextObservation,
+    beta: float,
+    no_information_penalty: float = 2.0,
+    information_epsilon: float = 1e-12,
+) -> np.ndarray:
     """计算一个 context 在给定 beta 下的七策略 log-likelihood。
 
-    输入语义：observation 已包含统一 Q 和真实方向；beta 必须为正数。
+    输入语义：observation 已包含统一 Q 和真实方向；beta 必须为正数；固定惩罚和
+    epsilon 控制无信息行的损失语义。
     输出语义：返回长度为策略数的 log-likelihood 数组。
     关键约束：使用 logsumexp 计算 softmax 分母，非法方向 ``-inf`` 自动不参与分母。
     """
@@ -467,21 +531,21 @@ def context_strategy_log_likelihood(observation: ContextObservation, beta: float
     if observation.valid_action_count == 0:
         return np.full(observation.q_values.shape[1], np.nan, dtype=float)
 
-    scaled = beta * observation.q_values
-    log_denominator = logsumexp(scaled, axis=2)
-    row_index = np.arange(observation.valid_action_count)[:, None]
-    agent_index = np.arange(observation.q_values.shape[1])[None, :]
-    action_index = np.broadcast_to(
-        observation.action_indices[:, None],
-        (observation.valid_action_count, observation.q_values.shape[1]),
+    action_log_probability = action_log_probability_with_no_information_penalty(
+        observation.q_values,
+        observation.action_indices,
+        beta,
+        no_information_penalty=no_information_penalty,
+        information_epsilon=information_epsilon,
     )
-    true_scores = scaled[row_index, agent_index, action_index]
-    return np.sum(true_scores - log_denominator, axis=0)
+    return np.sum(action_log_probability, axis=0)
 
 
 def context_eligible_strategy_log_likelihood(
     observation: ContextObservation,
     beta: float,
+    no_information_penalty: float = 2.0,
+    information_epsilon: float = 1e-12,
 ) -> np.ndarray:
     """构造信息覆盖率门控后的行为策略 likelihood。
 
@@ -491,7 +555,12 @@ def context_eligible_strategy_log_likelihood(
     级候选排除，不是把某一无信息动作的概率强行设为 0。
     """
 
-    strategy_log_likelihood = context_strategy_log_likelihood(observation, beta)
+    strategy_log_likelihood = context_strategy_log_likelihood(
+        observation,
+        beta,
+        no_information_penalty=no_information_penalty,
+        information_epsilon=information_epsilon,
+    )
     eligible = observation.resolved_strategy_eligible()
     if eligible.shape != strategy_log_likelihood.shape:
         raise ValueError(
@@ -503,7 +572,12 @@ def context_eligible_strategy_log_likelihood(
     return gated
 
 
-def context_marginal_nll(observation: ContextObservation, beta: float) -> float:
+def context_marginal_nll(
+    observation: ContextObservation,
+    beta: float,
+    no_information_penalty: float = 2.0,
+    information_epsilon: float = 1e-12,
+) -> float:
     """计算覆盖率合格策略边际化后的单 context 负对数似然。
 
     输入语义：observation 必须至少包含一个有效动作。
@@ -512,7 +586,12 @@ def context_marginal_nll(observation: ContextObservation, beta: float) -> float:
     上层被排除出 beta 拟合并标记 vague，不能调用本函数强行构造 NLL。
     """
 
-    candidate_log_likelihood = context_eligible_strategy_log_likelihood(observation, beta)
+    candidate_log_likelihood = context_eligible_strategy_log_likelihood(
+        observation,
+        beta,
+        no_information_penalty=no_information_penalty,
+        information_epsilon=information_epsilon,
+    )
     if np.any(np.isnan(candidate_log_likelihood)):
         raise ValueError("无有效动作的 context 不能进入 beta loss。")
     candidate_count = int(np.sum(np.isfinite(candidate_log_likelihood)))
@@ -521,7 +600,12 @@ def context_marginal_nll(observation: ContextObservation, beta: float) -> float:
     return float(-(logsumexp(candidate_log_likelihood) - math.log(candidate_count)))
 
 
-def total_context_nll(observations: Iterable[ContextObservation], beta: float) -> float:
+def total_context_nll(
+    observations: Iterable[ContextObservation],
+    beta: float,
+    no_information_penalty: float = 2.0,
+    information_epsilon: float = 1e-12,
+) -> float:
     """汇总一组 contexts 的边际负对数似然。
 
     输入语义：observations 可以跨 trial，但应属于同一 beta 参数组。
@@ -536,7 +620,12 @@ def total_context_nll(observations: Iterable[ContextObservation], beta: float) -
     ]
     if not effective:
         return 0.0
-    return batch_total_context_nll(build_observation_batch(effective), beta)
+    return batch_total_context_nll(
+        build_observation_batch(effective),
+        beta,
+        no_information_penalty=no_information_penalty,
+        information_epsilon=information_epsilon,
+    )
 
 
 def build_observation_batch(observations: list[ContextObservation]) -> ObservationBatch:
@@ -563,7 +652,12 @@ def build_observation_batch(observations: list[ContextObservation]) -> Observati
     )
 
 
-def batch_total_context_nll(batch: ObservationBatch, beta: float) -> float:
+def batch_total_context_nll(
+    batch: ObservationBatch,
+    beta: float,
+    no_information_penalty: float = 2.0,
+    information_epsilon: float = 1e-12,
+) -> float:
     """向量化计算一组 contexts 的总边际 NLL。
 
     输入语义：batch 已把所有有效动作连续拼接，beta 为正数。
@@ -574,16 +668,13 @@ def batch_total_context_nll(batch: ObservationBatch, beta: float) -> float:
 
     if beta <= 0:
         raise ValueError("beta 必须大于 0。")
-    scaled = beta * batch.q_values
-    log_denominator = logsumexp(scaled, axis=2)
-    row_index = np.arange(batch.action_indices.size)[:, None]
-    agent_index = np.arange(batch.q_values.shape[1])[None, :]
-    action_index = np.broadcast_to(
-        batch.action_indices[:, None],
-        (batch.action_indices.size, batch.q_values.shape[1]),
+    action_log_probability = action_log_probability_with_no_information_penalty(
+        batch.q_values,
+        batch.action_indices,
+        beta,
+        no_information_penalty=no_information_penalty,
+        information_epsilon=information_epsilon,
     )
-    true_scores = scaled[row_index, agent_index, action_index]
-    action_log_probability = true_scores - log_denominator
     context_log_likelihood = np.add.reduceat(
         action_log_probability,
         batch.context_starts,
@@ -633,7 +724,12 @@ def fit_beta(
     def objective(eta: float) -> float:
         """把无约束 log-beta 转换为 beta 后计算总 NLL。"""
 
-        return batch_total_context_nll(batch, math.exp(float(eta)))
+        return batch_total_context_nll(
+            batch,
+            math.exp(float(eta)),
+            no_information_penalty=config.no_information_penalty,
+            information_epsilon=config.information_epsilon,
+        )
 
     grid_losses = np.asarray([objective(eta) for eta in eta_grid], dtype=float)
     best_index = int(np.argmin(grid_losses))
@@ -807,7 +903,12 @@ def run_grouped_cross_validation(
         train_model = fit_full_beta_models(train_by_player, config)
         shared_validation_nll = float(
             sum(
-                total_context_nll(values, train_model["shared_beta"])
+                total_context_nll(
+                    values,
+                    train_model["shared_beta"],
+                    no_information_penalty=config.no_information_penalty,
+                    information_epsilon=config.information_epsilon,
+                )
                 for values in validation_by_player.values()
             )
         )
@@ -815,7 +916,12 @@ def run_grouped_cross_validation(
         if train_model["separate_beta"] is not None:
             separate_validation_nll = float(
                 sum(
-                    total_context_nll(validation_by_player[player], beta)
+                    total_context_nll(
+                        validation_by_player[player],
+                        beta,
+                        no_information_penalty=config.no_information_penalty,
+                        information_epsilon=config.information_epsilon,
+                    )
                     for player, beta in train_model["separate_beta"].items()
                 )
             )
@@ -939,8 +1045,18 @@ def write_player_posterior(
             null_likelihood = float("nan")
             gain = float("nan")
         else:
-            log_likelihood_array = context_strategy_log_likelihood(observation, beta)
-            candidate_log_likelihood = context_eligible_strategy_log_likelihood(observation, beta)
+            log_likelihood_array = context_strategy_log_likelihood(
+                observation,
+                beta,
+                no_information_penalty=config.no_information_penalty,
+                information_epsilon=config.information_epsilon,
+            )
+            candidate_log_likelihood = context_eligible_strategy_log_likelihood(
+                observation,
+                beta,
+                no_information_penalty=config.no_information_penalty,
+                information_epsilon=config.information_epsilon,
+            )
             eligible = observation.resolved_strategy_eligible()
             if bool(np.any(eligible)):
                 posterior_array = posterior_from_log_likelihood(candidate_log_likelihood)
@@ -1047,7 +1163,7 @@ def fit_context_strategy_posterior_dataframe(
     # CV 信息。global_selection_uses_context_actions 显式提醒后续分析其乐观偏差来源。
     result.attrs = copy.deepcopy(raw_data.attrs)
     result.attrs["context_strategy_posterior_model"] = {
-        "version": "06c-v3",
+        "version": "06c-v4",
         "strategy_order": list(config.agents),
         "strategy_number": {name: STRATEGY_NUMBER[name] for name in config.agents},
         "normalization": "per_player_tile_strategy_legal_direction_minmax_from_raw_q",
@@ -1057,6 +1173,8 @@ def fit_context_strategy_posterior_dataframe(
         "posterior_threshold": config.posterior_threshold,
         "min_information_coverage": config.min_information_coverage,
         "information_epsilon": config.information_epsilon,
+        "no_information_likelihood": "uniform_log_probability_minus_fixed_penalty",
+        "no_information_penalty": config.no_information_penalty,
         "null_model": "uniform_over_legal_actions_diagnostic_only",
         "null_participates_in_beta_or_posterior": False,
         "global_selection_rule": "06b_context_probability_accuracy",
@@ -1105,6 +1223,7 @@ def process_context_strategy_posterior_file(
         posterior_threshold=base_config.posterior_threshold,
         min_information_coverage=base_config.min_information_coverage,
         information_epsilon=base_config.information_epsilon,
+        no_information_penalty=base_config.no_information_penalty,
         random_seed=base_config.random_seed + file_index,
     )
     input_file = Path(input_path)

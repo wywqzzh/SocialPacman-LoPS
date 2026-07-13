@@ -80,6 +80,8 @@ class SharedPathUtilityEngine:
         self.config = config
         if not 0.0 < config.local_discount_factor <= 1.0:
             raise ValueError("local_discount_factor 必须满足 0 < gamma <= 1。")
+        if not 0.0 < config.approach_discount_factor <= 1.0:
+            raise ValueError("approach_discount_factor 必须满足 0 < gamma <= 1。")
         self.reward_amount = compiled_map.reward_amount
         self.neighbor_ids = compiled_map.neighbor_ids
         self.strategy_depths = (
@@ -102,8 +104,8 @@ class SharedPathUtilityEngine:
             [[0.0, 0.0] for _ in DIRECTIONS]
             for _ in PATH_Q_COLUMNS
         ]
-        # Local 表达玩家在固定局部范围内选择一条最佳取食路线，因此需要额外保存
-        # 每个首方向的最大叶路径奖励。其余策略继续使用叶路径均值，不受该改动影响。
+        # Local 与 Approach 都表达玩家会选择一条可执行的最佳目标路径，因此额外保存
+        # 每个首方向的最大叶路径奖励。其余策略继续使用叶路径均值。
         self.leaf_max_utility: list[list[float]] = [
             [-np.inf for _ in DIRECTIONS]
             for _ in PATH_Q_COLUMNS
@@ -244,8 +246,9 @@ class SharedPathUtilityEngine:
         输入语义：strategy_index 指定策略，state 是父节点状态，next_position_id 是下一
         位置，child_depth 是该位置相对搜索根节点的步数。
         输出语义：返回子节点状态，以及该策略是否在子节点成为叶节点。
-        关键约束：只有 Local 的资源奖励按 ``gamma**(child_depth-1)`` 衰减；其它策略
-        保持原奖励语义。reward 更新和 risk 更新顺序按策略规则显式表达。
+        关键约束：Local 的资源奖励和 Approach 的 ghost 命中奖励分别使用自己的
+        ``gamma**(child_depth-1)`` 衰减；其它策略保持原奖励语义。reward 更新和 risk
+        更新顺序按策略规则显式表达。
         """
 
         if strategy_index == LOCAL_INDEX:
@@ -297,7 +300,9 @@ class SharedPathUtilityEngine:
             )
             return (
                 StrategyState(
-                    state.utility + exact_reward + 0.0 * exact_risk,
+                    state.utility
+                    + (self.config.approach_discount_factor ** (child_depth - 1)) * exact_reward
+                    + 0.0 * exact_risk,
                     state.bean_mask,
                     state.energizer_mask,
                     ghost_status,
@@ -534,8 +539,9 @@ class SharedPathUtilityEngine:
 
         输入语义：self.leaf_stats 已经在共享路径搜索中填充。
         输出语义：返回 Q 列名到四方向 Q 向量的映射。
-        关键约束：Local 使用同一首方向下的最大叶路径奖励，表示玩家会选择最佳局部
-        取食路线；其余路径策略保持叶路径均值。无叶节点方向保持 0，Q 使用 float64。
+        关键约束：Local 和 Approach 使用同一首方向下的最大叶路径奖励，分别表示玩家
+        会选择最佳局部取食路线和最佳追鬼路线；其余路径策略保持叶路径均值。无叶节点
+        方向保持 0，Q 使用 float64。
         """
 
         q_values: dict[str, np.ndarray] = {}
@@ -544,7 +550,7 @@ class SharedPathUtilityEngine:
             available_indices: list[int] = []
             for direction_id, (utility_sum, leaf_count) in enumerate(self.leaf_stats[strategy_index]):
                 if leaf_count > 0:
-                    if strategy_index == LOCAL_INDEX:
+                    if strategy_index in {LOCAL_INDEX, APPROACH_INDEX}:
                         q_list[direction_id] = self.leaf_max_utility[strategy_index][direction_id]
                     else:
                         q_list[direction_id] = utility_sum / leaf_count

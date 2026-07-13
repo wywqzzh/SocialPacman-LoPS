@@ -94,6 +94,7 @@ def discover_posterior_players(data: pd.DataFrame) -> list[str]:
             f"{player}_eat_energizer",
             f"{player}_eat_ghost",
             f"{player}_selected_global_Q",
+            f"{player}_selected_energizer_Q",
         }
         required.update(f"{player}_{agent}_Q" for agent in DEFAULT_AGENTS if agent != "global")
         missing = sorted(required - set(data.columns))
@@ -110,7 +111,7 @@ def parse_posterior_score(value: Any, strategy_count: int) -> list[float]:
 
     输入语义：value 通常是长度为 7 的 list；stay 行可能保存全 NaN。
     输出语义：有效 posterior 原样返回；全 NaN 返回全零，供 is_stay 优先级处理。
-    关键约束：06c-v3 的 posterior 已只在 coverage 合格的行为策略间归一化；部分
+    关键约束：06c-v5 的 posterior 已只在 coverage 合格的行为策略间归一化；部分
     NaN 或长度错误视为数据损坏，不能静默补齐。
     """
 
@@ -159,7 +160,12 @@ def prepare_revision_view(data: pd.DataFrame, player: str) -> pd.DataFrame:
     view["predict_dir"] = pd.Series([np.nan] * len(view), index=view.index, dtype=object)
 
     for agent in DEFAULT_AGENTS:
-        raw_column = f"{player}_selected_global_Q" if agent == "global" else f"{player}_{agent}_Q"
+        if agent == "global":
+            raw_column = f"{player}_selected_global_Q"
+        elif agent == "energizer":
+            raw_column = f"{player}_selected_energizer_Q"
+        else:
+            raw_column = f"{player}_{agent}_Q"
         normalized_values: list[list[float]] = []
         for row_index, value in view[raw_column].items():
             q_array = np.asarray(value, dtype=float)
@@ -244,16 +250,27 @@ def revise_context_strategy_posterior_dataframe(
     summaries: dict[str, dict[str, int]] = {}
     for player in players:
         player_view = prepare_revision_view(result, player)
-        revised_view = legacy.revise_player_view(player_view, input_path, player, scared_time)
+        revised_view = legacy.revise_player_view(
+            player_view,
+            input_path,
+            player,
+            scared_time,
+            use_energizer_outcome_rule=True,
+        )
         summaries[player] = write_player_revision(result, player, revised_view)
 
     result.attrs = copy.deepcopy(data.attrs)
     result.attrs["context_strategy_posterior_revision"] = {
-        "version": "07c-v6",
-        "source": "06c_context_strategy_posterior_v3",
+        "version": "07c-v8",
+        "source": "06c_context_strategy_posterior_v5",
         "initial_strategy_score": "coverage_gated_strategy_posterior",
         "q_normalization": "per_player_tile_strategy_legal_direction_minmax_from_raw_q",
         "global_q_source": "selected_global_Q",
+        "energizer_q_source": "selected_energizer_Q",
+        "energizer_outcome_rule": (
+            "context_end_eat_event_and_energizer_accuracy_ge_0.70_"
+            "and_relative_to_best_ge_0.80"
+        ),
         # 显式记录 Approach 修正规则状态，保证仅查看输出文件 attrs 也能还原本次流程。
         "legacy_rule_order_reused": False,
         "uneaten_ghost_approach_revision_enabled": False,

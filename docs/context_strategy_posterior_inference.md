@@ -2,7 +2,7 @@
 
 > 当前实现版本：`06c-v4`（代码状态核对日期：2026-07-12）。本版在原模型上加入
 > context 级策略信息覆盖率门控；Null 均匀动作模型只作为诊断基线，不参与 beta
-> 拟合或 posterior。07c 当前输出版本为 `07c-v6`。
+> 拟合或 posterior。07c 当前输出版本为 `07c-v8`。
 
 ## 1. 目标
 
@@ -97,10 +97,10 @@ $$
 吃豆结束点。强事件自身永远不会被删除。距离使用同一 trial 内的时间 tile 下标，不
 使用地图空间距离。
 
-普通转向不切段，只有掉头作为软边界；另一名玩家吃 energizer 或 ghost 也作为当前
-玩家的公共环境软边界。软边界产生的小于 4 行的短段会在同一硬边界区间内与相邻段
-合并，不会跨越硬边界。玩家进入或离开普通豆 10 步范围不再属于 context 划分条件。
-P1/P2 的私有强事件分别计算。
+普通转向和掉头都不切段，而是作为 context 内动作参与策略 likelihood。另一名玩家
+吃 energizer 或 ghost 仍作为当前玩家的公共环境软边界；软边界产生的小于 4 行的
+短段会在同一硬边界区间内与相邻段合并，不会跨越硬边界。玩家进入或离开普通豆
+10 步范围不再属于 context 划分条件。P1/P2 的私有强事件分别计算。
 
 长 stay 还需要接受当前玩家私有吃 ghost 事件的二次过滤。设长 stay 区间为 $S=[s,e)$，当前玩家吃 ghost 的事件行为 $g$，事件行到 stay 最近实际行的距离为：
 
@@ -615,9 +615,24 @@ global_selection_uses_context_actions = True
 1. 将 context posterior 作为临时初始策略分数；
 2. 从 raw Q 重新执行 06c 合法方向 Min-Max；
 3. Global 使用 `<player>_selected_global_Q`；
-4. 死亡、不可用和无动作行继续排除；
-5. 复用当前 07 的 vague、energizer、energizer 后 approach/scared-time 和错误
-   energizer 修正规则；“未亲自吃到 ghost 就否定 Approach”的二次修正规则当前停用。
+4. Energizer 使用 `<player>_selected_energizer_Q`；
+5. 死亡、不可用和无动作行继续排除；
+6. 复用当前 07 的 vague、energizer 后 approach 和 scared-time 规则；“未亲自吃到
+   ghost 就否定 Approach”的二次修正规则与旧错误 Energizer 回滚规则当前停用。
+
+对于以玩家私有吃 Energizer 事件结束的 context，07c-v8 只有在 Energizer 的单策略
+准确率同时满足
+
+$$
+A_E\ge 0.70,
+\qquad
+\frac{A_E}{A_{\max}}\ge 0.80
+$$
+
+时才把整段修正为 Energizer。这样允许 Energizer 略低于另一种解释能力最强的策略，
+但不会让一次成功结果覆盖整段中不足的行为证据。没有吃到 Energizer 时，只有当
+Energizer 与其它策略精确并列最优，才从并列集合中移除 Energizer；唯一最优结果
+不会仅因最终没有吃到而被否定。
 
 人工规则可能把分数改成 one-hot 或 multi-hot，因此修正结果保存为：
 
@@ -628,7 +643,7 @@ global_selection_uses_context_actions = True
 
 `revised_strategy_score` 不是 posterior，不要求总和为 $1$。分析时应明确区分 06c 的模型后验和 07c 的规则修正标签；视频优先显示 07c 标签，但两套结果都保留在同一个文件中。
 
-07c-v6 还要求输入含有 `<player>_strategy_information_coverage` 和
+07c-v8 还要求输入含有 `<player>_strategy_information_coverage` 和
 `<player>_strategy_eligible`，并在 attrs 中记录初始分数来自
 `coverage_gated_strategy_posterior`。它不宣称完整复刻旧 07 的规则顺序；输出 metadata
 明确保存 `legacy_rule_order_reused=False` 和

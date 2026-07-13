@@ -1,9 +1,9 @@
 """事件硬边界版 Social Pacman 动态策略拟合。
 
 本模块是 06 动态策略拟合的实验新版。它复用旧 06 的权重拟合器和输出字段，
-只替换 context 划分方式：先按玩家自己的行为事件生成不可跨越的硬边界，再把掉头
-和队友造成的高影响公共环境事件作为软边界，最后在不跨硬边界的前提下合并软边界
-造成的过短段。
+只替换 context 划分方式：先按玩家自己的行为事件生成不可跨越的硬边界，再把队友
+造成的高影响公共环境事件作为软边界，最后在不跨硬边界的前提下合并软边界造成的
+过短段。玩家掉头只作为段内动作参与策略 likelihood，不再触发 context 切分。
 """
 
 from __future__ import annotations
@@ -778,12 +778,12 @@ def hard_boundary_points(
 
 
 def soft_turnaround_points(trial_data: pd.DataFrame) -> set[int]:
-    """生成只由掉头动作产生的软边界。
+    """生成掉头位置，供诊断分析使用。
 
     输入语义：trial_data 是单 trial 临时表，``action_dir`` 已经把非法方向置为 NaN。
-    输出语义：返回局部行号边界集合。
-    关键约束：普通转向不切段；只在 left/right 或 up/down 直接反向时切段。
-    NaN 过渡会使用前一个有效方向作为参照，避免短暂停顿掩盖掉头。
+    输出语义：返回局部行号集合。
+    关键约束：该函数不再参与正式 context 划分，只保留用于行为诊断和A/B比较；
+    NaN 过渡仍使用前一个有效方向作为参照，便于稳定识别动作反转位置。
     """
 
     boundaries: set[int] = set()
@@ -869,15 +869,15 @@ def build_event_context_segments(
     player: str,
     config: DynamicStrategyFittingConfig | None = None,
 ) -> tuple[list[tuple[int, int]], list[bool]]:
-    """按事件硬边界和掉头软边界构造全局 context 段落。
+    """按玩家事件硬边界和队友事件软边界构造全局 context 段落。
 
     输入语义：prepared_data 是 ``prepare_fitting_dataframe`` 生成的玩家临时表，
     player 是当前拟合玩家。
     输出语义：返回全局 row_id 半开区间列表，以及每个区间是否为 stay/all-NaN 段。
     关键约束：短段合并只发生在同一硬边界区间内部，绝不跨当前玩家自己的 trial、
-    吃豆段、生死、energizer、吃 ghost 或长 stay 硬边界。软边界来自掉头和队友的
-    energizer/ghost 事件；队友事件只有在两侧能形成足够长段落时才保留。不再根据玩家
-    到普通豆的距离或 ghost 计时恢复生成任何 context 事件。
+    吃豆段、生死、energizer、吃 ghost 或长 stay 硬边界。软边界只来自队友的
+    energizer/ghost 事件；队友事件只有在两侧能形成足够长段落时才保留。掉头、普通
+    转向、玩家到普通豆的距离和 ghost 计时恢复都不再生成 context 边界。
     """
 
     config = DynamicStrategyFittingConfig() if config is None else config
@@ -898,12 +898,10 @@ def build_event_context_segments(
                 ghost_stay_suppression_window=config.ghost_stay_suppression_window,
             )
         )
-        # 掉头反映玩家自身动作结构；队友吃 energizer/ghost 则改变公共 ghost 环境。
-        # 两者都先作为候选软边界，再统一经过 min_length 合并，避免公共事件制造碎段。
-        soft_boundaries = soft_turnaround_points(trial_data) | soft_teammate_event_points(
-            trial_data,
-            player,
-        )
+        # 玩家自己的掉头只作为段内动作进入后续 likelihood，不再用同一动作变量预先
+        # 切段。队友吃 energizer/ghost 会改变公共 ghost 环境，因此仍作为候选软边界，
+        # 并经过 min_length 合并，避免公共事件制造碎段。
+        soft_boundaries = soft_teammate_event_points(trial_data, player)
 
         trial_contexts: list[tuple[int, int]] = []
         for hard_start, hard_end in zip(hard_boundaries[:-1], hard_boundaries[1:]):

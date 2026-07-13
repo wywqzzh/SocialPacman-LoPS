@@ -30,6 +30,11 @@ from LoPS.dynamic_strategy_event_context import (
     append_player_event_columns,
     apply_best_global_candidates,
     build_event_context_segments,
+    parse_global_cluster_matrix,
+    parse_global_cluster_meta,
+    parse_position_or_none,
+    positive_prediction_indices,
+    q_like_zero,
 )
 from LoPS.dynamic_strategy_fitting import DEFAULT_AGENTS, DynamicStrategyFittingConfig
 
@@ -229,6 +234,9 @@ def discover_posterior_players(data: pd.DataFrame, config: ContextStrategyPoster
             f"{player}_global_utility_k",
             f"{player}_global_utility_k_norm",
             f"{player}_global_utility_k_meta",
+            f"{player}_energizer_utility_k",
+            f"{player}_energizer_utility_k_norm",
+            f"{player}_energizer_utility_k_meta",
         }
         required.update(f"{player}_{agent}_Q" for agent in config.agents)
         missing = sorted(required - set(data.columns))
@@ -325,6 +333,185 @@ def prepare_player_view(
     view["global_Q"] = copy.deepcopy(view[f"{player}_global_Q"])
     view["global_Q_norm"] = copy.deepcopy(view[f"{player}_global_Q_norm"])
     return view
+
+
+def energizer_target_position(meta: dict[str, Any]) -> tuple[int, int] | None:
+    """从05 Energizer 候选 meta 中读取稳定目标坐标。
+
+    输入语义：meta 对应候选矩阵中的一行。
+    输出语义：返回 ``target_position``；字段缺失或非法时返回 None。
+    关键约束：目标坐标是跨行稳定身份，不使用每行候选列表下标或 target_id 猜测。
+    """
+
+    return parse_position_or_none(meta.get("target_position"))
+
+
+def match_energizer_target_index(
+    row_meta: list[dict[str, Any]],
+    target_position: tuple[int, int],
+) -> int | None:
+    """在某一行候选列表中匹配同一个 Energizer 目标。
+
+    输入语义：row_meta 与该行候选矩阵逐行对齐；target_position 来自 context 起点。
+    输出语义：找到目标时返回矩阵行号，否则返回 None。
+    关键约束：目标可能被玩家或队友在 context 中途吃掉；消失后返回 None，让该行按
+    无信息处理，而不是错误匹配到剩余列表中相同下标的另一个 energizer。
+    """
+
+    for index, meta in enumerate(row_meta):
+        if energizer_target_position(meta) == target_position:
+            return index
+    return None
+
+
+def score_context_energizer_candidate(
+    data: pd.DataFrame,
+    context: tuple[int, int],
+    player: str,
+    start_meta: dict[str, Any],
+) -> dict[str, Any]:
+    """计算一个明确 Energizer 目标对整个 context 动作的解释能力。
+
+    输入语义：data 是单玩家临时视图；context 是半开区间；start_meta 描述 context
+    起点仍存在的一个 energizer。
+    输出语义：返回概率准确率、集合准确率、起点距离和稳定目标坐标。
+    关键约束：所有真实动作行都进入分母；目标缺失或候选无正向推进时贡献0。并列最大
+    方向包含真实动作时按 ``1/并列数`` 贡献概率准确率，与 Global 选择规则一致。
+    """
+
+    target_position = energizer_target_position(start_meta)
+    if target_position is None:
+        return {
+            "target_position": None,
+            "start_distance": float("inf"),
+            "valid_actions": 0,
+            "prob_accuracy": 0.0,
+            "set_accuracy": 0.0,
+            "meta": start_meta,
+        }
+
+    start, end = context
+    valid_actions = 0
+    probability_credit = 0.0
+    set_hits = 0
+    matrix_column = f"{player}_energizer_utility_k_norm"
+    meta_column = f"{player}_energizer_utility_k_meta"
+    for row_index in range(start, end):
+        action = data.at[row_index, "action_dir"]
+        if not isinstance(action, str):
+            continue
+        valid_actions += 1
+        row_meta = parse_global_cluster_meta(data.at[row_index, meta_column])
+        matched_index = match_energizer_target_index(row_meta, target_position)
+        if matched_index is None:
+            continue
+        matrix = parse_global_cluster_matrix(data.at[row_index, matrix_column])
+        if matched_index >= matrix.shape[0]:
+            continue
+        prediction_indices = positive_prediction_indices(matrix[matched_index])
+        if not prediction_indices:
+            continue
+        true_index = DIRECTION_TO_INDEX[action]
+        if true_index in prediction_indices:
+            set_hits += 1
+            probability_credit += 1.0 / len(prediction_indices)
+
+    return {
+        "target_position": target_position,
+        "start_distance": float(start_meta.get("min_distance", np.inf)),
+        "valid_actions": valid_actions,
+        "prob_accuracy": probability_credit / valid_actions if valid_actions else 0.0,
+        "set_accuracy": set_hits / valid_actions if valid_actions else 0.0,
+        "meta": start_meta,
+    }
+
+
+def choose_best_energizer_candidate(
+    data: pd.DataFrame,
+    context: tuple[int, int],
+    player: str,
+) -> dict[str, Any] | None:
+    """为一个 player-context 选择解释真实动作最好的 Energizer 目标。
+
+    输入语义：data 已包含05候选字段；context 是半开区间；player 指定玩家。
+    输出语义：返回最佳目标评分；context 起点没有 energizer 时返回 None。
+    关键约束：破平依次使用概率准确率、集合准确率、较近起点距离和目标坐标。目标
+    选择只依赖 utility 与动作，不读取最终是否吃到；事件结果留给07c消除策略歧义。
+    """
+
+    start, _ = context
+    meta_column = f"{player}_energizer_utility_k_meta"
+    start_meta_values = parse_global_cluster_meta(data.at[start, meta_column])
+    scored = [
+        score_context_energizer_candidate(data, context, player, meta)
+        for meta in start_meta_values
+        if energizer_target_position(meta) is not None
+    ]
+    if not scored:
+        return None
+    return max(
+        scored,
+        key=lambda item: (
+            item["prob_accuracy"],
+            item["set_accuracy"],
+            -item["start_distance"],
+            -item["target_position"][0],
+            -item["target_position"][1],
+        ),
+    )
+
+
+def apply_best_energizer_candidates(
+    data: pd.DataFrame,
+    contexts: list[tuple[int, int]],
+    player: str,
+) -> pd.DataFrame:
+    """在 context 级选择 best Energizer，并写入06c临时正式 Q。
+
+    输入语义：data 已完成 best Global 选择；contexts 是当前玩家的完整 context 列表。
+    输出语义：返回新视图，其中 ``<player>_energizer_Q`` 已替换为每段最佳目标 Q，
+    并新增 selected Q、目标坐标、准确率和 meta 解释列。
+    关键约束：05原始 DataFrame 不被修改。没有目标或目标中途消失的行保留合法方向
+    mask，但有限方向全部置0，明确表示目标导向 Energizer 在该行无信息。
+    """
+
+    result = data.copy(deep=True)
+    selected_column = "selected_energizer_Q"
+    best_columns = {
+        "best_energizer_target_position": np.nan,
+        "best_energizer_target_prob_accuracy": np.nan,
+        "best_energizer_target_set_accuracy": np.nan,
+        "best_energizer_target_meta": np.nan,
+    }
+    result[selected_column] = pd.Series([np.nan] * len(result), index=result.index, dtype=object)
+    for column, default in best_columns.items():
+        result[column] = pd.Series([default] * len(result), index=result.index, dtype=object)
+
+    raw_column = f"{player}_energizer_utility_k"
+    meta_column = f"{player}_energizer_utility_k_meta"
+    formal_column = f"{player}_energizer_Q"
+    for context in contexts:
+        best = choose_best_energizer_candidate(result, context, player)
+        start, end = context
+        target_position = best["target_position"] if best is not None else None
+        for row_index in range(start, end):
+            raw_q = q_like_zero(result.at[row_index, formal_column])
+            if target_position is not None:
+                row_meta = parse_global_cluster_meta(result.at[row_index, meta_column])
+                matched_index = match_energizer_target_index(row_meta, target_position)
+                if matched_index is not None:
+                    raw_matrix = parse_global_cluster_matrix(result.at[row_index, raw_column])
+                    if matched_index < raw_matrix.shape[0]:
+                        raw_q = raw_matrix[matched_index].tolist()
+
+            result.at[row_index, formal_column] = raw_q
+            result.at[row_index, selected_column] = raw_q
+            if best is not None:
+                result.at[row_index, "best_energizer_target_position"] = target_position
+                result.at[row_index, "best_energizer_target_prob_accuracy"] = best["prob_accuracy"]
+                result.at[row_index, "best_energizer_target_set_accuracy"] = best["set_accuracy"]
+                result.at[row_index, "best_energizer_target_meta"] = best["meta"]
+    return result
 
 
 def build_context_observation(
@@ -427,6 +614,7 @@ def prepare_player_data(
         context_config,
     )
     selected_view = apply_best_global_candidates(view, contexts, player)
+    selected_view = apply_best_energizer_candidates(selected_view, contexts, player)
     observations = [
         build_context_observation(selected_view, player, context, stay, config)
         for context, stay in zip(contexts, is_stay)
@@ -983,6 +1171,11 @@ def initialize_player_output(index: pd.Index, player: str) -> pd.DataFrame:
         "best_global_cluster_prob_accuracy",
         "best_global_cluster_set_accuracy",
         "best_global_cluster_meta",
+        "selected_energizer_Q",
+        "best_energizer_target_position",
+        "best_energizer_target_prob_accuracy",
+        "best_energizer_target_set_accuracy",
+        "best_energizer_target_meta",
         "trial_context",
         "strategy_log_likelihood",
         "strategy_information_coverage",
@@ -1029,6 +1222,24 @@ def write_player_posterior(
             ("best_global_cluster_prob_accuracy", "best_global_cluster_prob_accuracy"),
             ("best_global_cluster_set_accuracy", "best_global_cluster_set_accuracy"),
             ("best_global_cluster_meta", "best_global_cluster_meta"),
+        ):
+            values = [copy.deepcopy(prepared.view.at[index, source]) for index in labels]
+            output.loc[labels, f"{player}_{target}"] = pd.Series(values, index=labels, dtype=object)
+
+        selected_energizer_q = [
+            copy.deepcopy(prepared.view.at[index, "selected_energizer_Q"])
+            for index in labels
+        ]
+        output.loc[labels, f"{player}_selected_energizer_Q"] = pd.Series(
+            selected_energizer_q,
+            index=labels,
+            dtype=object,
+        )
+        for source, target in (
+            ("best_energizer_target_position", "best_energizer_target_position"),
+            ("best_energizer_target_prob_accuracy", "best_energizer_target_prob_accuracy"),
+            ("best_energizer_target_set_accuracy", "best_energizer_target_set_accuracy"),
+            ("best_energizer_target_meta", "best_energizer_target_meta"),
         ):
             values = [copy.deepcopy(prepared.view.at[index, source]) for index in labels]
             output.loc[labels, f"{player}_{target}"] = pd.Series(values, index=labels, dtype=object)
@@ -1163,7 +1374,7 @@ def fit_context_strategy_posterior_dataframe(
     # CV 信息。global_selection_uses_context_actions 显式提醒后续分析其乐观偏差来源。
     result.attrs = copy.deepcopy(raw_data.attrs)
     result.attrs["context_strategy_posterior_model"] = {
-        "version": "06c-v4",
+        "version": "06c-v5",
         "strategy_order": list(config.agents),
         "strategy_number": {name: STRATEGY_NUMBER[name] for name in config.agents},
         "normalization": "per_player_tile_strategy_legal_direction_minmax_from_raw_q",
@@ -1179,6 +1390,10 @@ def fit_context_strategy_posterior_dataframe(
         "null_participates_in_beta_or_posterior": False,
         "global_selection_rule": "06b_context_probability_accuracy",
         "global_selection_uses_context_actions": True,
+        "energizer_utility_rule": "target_shortest_path_distance_reduction_without_radius",
+        "energizer_selection_rule": "context_probability_accuracy_by_target_position",
+        "energizer_selection_uses_context_actions": True,
+        "energizer_outcome_used_in_selection": False,
         "selected_beta_model": full_model["selected_model"],
         "beta_by_player": full_model["beta_by_player"],
         "shared_beta": full_model["shared_beta"],

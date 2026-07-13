@@ -11,6 +11,7 @@ import pandas as pd
 from LoPS.context_strategy_posterior import (
     ContextObservation,
     ContextStrategyPosteriorConfig,
+    apply_best_energizer_candidates,
     batch_total_context_nll,
     build_observation_batch,
     build_grouped_folds,
@@ -188,6 +189,38 @@ class ContextStrategyPosteriorTests(unittest.TestCase):
         own_energizer.loc[1, "p1_eat_energizer"] = True
         contexts, _ = build_event_context_segments(own_energizer, "p1", config)
         self.assertEqual(contexts, [(0, 1), (1, 10)])
+
+    def test_turnaround_action_no_longer_splits_context(self) -> None:
+        """验证持续掉头只作为段内动作，不再生成context边界。
+
+        输入语义：构造10行无资源事件trial，前5个动作向右、后5个动作向左。
+        输出语义：完整trial保持为一个context。
+        关键约束：即使掉头后的反向动作持续时间超过stay_length，也不能仅凭动作反转
+        切段；真正的策略变化应由行为事件或后续模型证据识别。
+        """
+
+        row_count = 10
+        data = pd.DataFrame(
+            {
+                "row_id": list(range(row_count)),
+                "DayTrial": ["01-01-test"] * row_count,
+                "action_dir": ["right"] * 5 + ["left"] * 5,
+                "available_dir": [True] * row_count,
+                "p1_alive": [True] * row_count,
+                "p1_eat_bean": [False] * row_count,
+                "p1_eat_energizer": [False] * row_count,
+                "p1_eat_ghost": [False] * row_count,
+            }
+        )
+
+        contexts, is_stay = build_event_context_segments(
+            data,
+            "p1",
+            DynamicStrategyFittingConfig(stay_length=4),
+        )
+
+        self.assertEqual(contexts, [(0, row_count)])
+        self.assertEqual(is_stay, [False])
 
     def test_stay_event_is_suppressed_near_private_eat_ghost(self) -> None:
         """验证 ghost 前后 5 tile 的 stay 整段取消边界，但远处 stay 保留。"""
@@ -404,6 +437,45 @@ class ContextStrategyPosteriorTests(unittest.TestCase):
         self.assertEqual(selected.at[0, "best_global_cluster_id"], 0)
         self.assertEqual(selected.at[0, "best_global_cluster_prob_accuracy"], 1.0)
         np.testing.assert_array_equal(selected.at[1, "global_Q"][:2], [0.0, 2.0])
+
+    def test_best_energizer_selection_tracks_target_position_across_rows(self) -> None:
+        """验证06c按目标坐标选择并跨行匹配最佳 Energizer。
+
+        输入语义：两个目标在候选列表中的顺序逐行交换；真实动作始终向右，第一个目标
+        始终预测向右，第二个目标始终预测向左。
+        输出语义：best target 必须保持为 ``(8,5)``，选中 Q 每行都预测向右。
+        关键约束：候选列表下标不是稳定身份，不能因第二行顺序交换而错配目标。
+        """
+
+        first = {"target_id": (8, 5), "target_position": (8, 5), "min_distance": 12.0}
+        second = {"target_id": (2, 5), "target_position": (2, 5), "min_distance": 4.0}
+        right_q = [0.0, 1.0, -np.inf, -np.inf]
+        left_q = [1.0, 0.0, -np.inf, -np.inf]
+        data = pd.DataFrame(
+            {
+                "action_dir": ["right", "right"],
+                "p1_energizer_Q": [[0.0, 0.0, -np.inf, -np.inf]] * 2,
+                "p1_energizer_utility_k": [
+                    [right_q, left_q],
+                    [left_q, right_q],
+                ],
+                "p1_energizer_utility_k_norm": [
+                    [right_q, left_q],
+                    [left_q, right_q],
+                ],
+                "p1_energizer_utility_k_meta": [
+                    [first, second],
+                    [second, first],
+                ],
+            }
+        )
+
+        selected = apply_best_energizer_candidates(data, [(0, 2)], "p1")
+
+        self.assertEqual(selected.at[0, "best_energizer_target_position"], (8, 5))
+        self.assertEqual(selected.at[0, "best_energizer_target_prob_accuracy"], 1.0)
+        np.testing.assert_array_equal(selected.at[0, "selected_energizer_Q"], right_q)
+        np.testing.assert_array_equal(selected.at[1, "selected_energizer_Q"], right_q)
 
     def test_bic_selects_shared_and_separate_beta_on_synthetic_data(self) -> None:
         """构造同质和异质玩家动作，验证 BIC 能选择一个或两个 beta。"""

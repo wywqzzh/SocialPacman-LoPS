@@ -60,6 +60,8 @@ LOW_EVIDENCE_MIN_EFFECTIVE_ACTION_RATIO = 0.5
 SCARED_GHOST_STATUS_MIN = 4
 DEFAULT_REVISION_RELATIVE_ACCURACY_THRESHOLD = 0.8
 ENERGIZER_FOLLOWUP_APPROACH_RELATIVE_ACCURACY_THRESHOLD = 0.75
+ENERGIZER_OUTCOME_MIN_ACCURACY = 0.70
+ENERGIZER_OUTCOME_RELATIVE_ACCURACY_THRESHOLD = 0.80
 
 
 @dataclass
@@ -701,6 +703,74 @@ def revise_vague(data: pd.DataFrame, contexts: list[tuple[int, int]]) -> None:
         apply_revised_weight(data, prev, end, context, revise_weight, update_predict_dir=True)
 
 
+def revise_energizer_by_outcome(data: pd.DataFrame) -> None:
+    """结合单策略准确率和 context 结束边界事件修正 Energizer。
+
+    输入语义：data 是单个 trial 的单玩家临时视图，包含 context、七策略 Q 和玩家
+    私有 ``eat_energizer`` 事件。
+    输出语义：若结束边界实际吃到 energizer，且 Energizer 单策略准确率不低于 0.70、
+    同时达到最佳单策略准确率的 0.80，则整段修正为 Energizer。若结束边界没有吃到，
+    仍只在 Energizer 与其它策略精确并列最优时移除 Energizer，再由统一优先级消歧。
+    关键约束：成功事件只能确认已有足够行为证据的 Energizer，不能把低准确率策略
+    强行覆盖到整段；失败事件也不否定单独解释能力唯一最高的 Energizer。事件定义
+    使用半开区间 ``(start, end)`` 的 ``end`` 行，因为06事件列标在资源消失后的到达行。
+    """
+
+    contexts = unique_sorted_contexts(data["trial_context"].dropna().to_numpy())
+    contexts = filter_contexts_to_trial(data, contexts)
+    energizer_index = AGENT_INDEX["energizer"]
+    for prev, end in contexts:
+        context = extract_context_data(data, prev, end)
+        if context is None:
+            continue
+        agent_accuracy, _ = score_agent_accuracies(context, list(range(len(AGENTS))))
+        tied_weight, max_accuracy = tied_best_accuracy_weight(agent_accuracy)
+        if max_accuracy <= 0:
+            continue
+
+        boundary_eats_energizer = (
+            end in data.index
+            and bool(data.at[end, "eat_energizer"])
+        )
+        if boundary_eats_energizer:
+            energizer_accuracy = float(agent_accuracy[energizer_index])
+            relative_accuracy = energizer_accuracy / float(max_accuracy)
+            if (
+                energizer_accuracy >= ENERGIZER_OUTCOME_MIN_ACCURACY
+                and relative_accuracy >= ENERGIZER_OUTCOME_RELATIVE_ACCURACY_THRESHOLD
+            ):
+                # 成功吃到 Energizer 只能在绝对准确率与相对准确率同时达标时确认意图。
+                # 这允许 Energizer 略低于另一策略，但避免单靠结果事件覆盖弱行为证据。
+                revised_weight = [0] * len(AGENTS)
+                revised_weight[energizer_index] = 1
+                apply_revised_weight(
+                    data,
+                    prev,
+                    end,
+                    context,
+                    revised_weight,
+                    update_predict_dir=True,
+                )
+            continue
+
+        tied_indices = [index for index, value in enumerate(tied_weight) if value == 1]
+        if energizer_index not in tied_indices or len(tied_indices) < 2:
+            continue
+
+        # 没有实际吃到时只删除精确并列集合中的 Energizer，其余并列证据完整保留；
+        # local/global/approach 等最终显示顺序仍由 strategy_from_weight 统一决定。
+        revised_weight = list(tied_weight)
+        revised_weight[energizer_index] = 0
+        apply_revised_weight(
+            data,
+            prev,
+            end,
+            context,
+            revised_weight,
+            update_predict_dir=True,
+        )
+
+
 def revise_approach(data: pd.DataFrame, contexts: list[tuple[int, int]]) -> None:
     """修正未实际吃到 ghost 的 approach 段落。
 
@@ -831,13 +901,20 @@ def filter_contexts_to_trial(data: pd.DataFrame, contexts: list[tuple[int, int]]
     return filtered
 
 
-def process_trial(data: pd.DataFrame, input_path: Path, trial_name: str, scared_time: int) -> pd.DataFrame | None:
+def process_trial(
+    data: pd.DataFrame,
+    input_path: Path,
+    trial_name: str,
+    scared_time: int,
+    *,
+    use_energizer_outcome_rule: bool = False,
+) -> pd.DataFrame | None:
     """处理单个 trial 的全部手动规则。
 
     输入语义：data 是同一 `DayTrial` 的切片，保留原始标签；trial_name 是 trial 名。
     输出语义：返回修正后的 two-ghost trial 数据。
-    关键约束：除当前临时停用的 Approach 二次修正外，其余规则执行顺序必须与既定
-    `reviseMain` 流程一致，避免前一条规则的输出尚未重算 strategy 就被后一条读取。
+    关键约束：默认保持旧07规则；07c显式启用 ``use_energizer_outcome_rule`` 时，
+    用准确率阈值和事件结果确认 Energizer，并停用旧的强制覆盖与后继 Local 回滚。
     """
 
     recompute_strategy(data, str(input_path), trial_name)
@@ -867,9 +944,12 @@ def process_trial(data: pd.DataFrame, input_path: Path, trial_name: str, scared_
     eat_energizer = np.where(data["eat_energizer"] == True)[0] - 1 + data["row_id"].iloc[0]
     eat_energizer_context = list(np.array(data["trial_context"].loc[eat_energizer]))
     eat_energizer_context = filter_contexts_to_trial(data, eat_energizer_context)
-    revise_weight = [0] * len(AGENTS)
-    revise_weight[AGENT_INDEX["energizer"]] = 1
-    revise_function(data, eat_energizer_context, revise_weight, AGENT_INDEX["energizer"])
+    if use_energizer_outcome_rule:
+        revise_energizer_by_outcome(data)
+    else:
+        revise_weight = [0] * len(AGENTS)
+        revise_weight[AGENT_INDEX["energizer"]] = 1
+        revise_function(data, eat_energizer_context, revise_weight, AGENT_INDEX["energizer"])
     recompute_strategy(data, str(input_path), trial_name)
 
     eat_energizer_next = [end for _, end in eat_energizer_context]
@@ -925,22 +1005,30 @@ def process_trial(data: pd.DataFrame, input_path: Path, trial_name: str, scared_
 
     recompute_strategy(data, str(input_path), trial_name)
 
-    energizer_index = np.where(data["strategy"] == STRATEGY_NUMBER["energizer"])[0] + data["row_id"].iloc[0]
-    groups = groupby(enumerate(energizer_index), lambda index_value: index_value[0] - index_value[1])
-    energizer_context = [(group_items[0][1], group_items[-1][1]) for _, group_items in ((key, list(group)) for key, group in groups)]
-    revise_wrong_energizer(data, energizer_context)
+    if not use_energizer_outcome_rule:
+        energizer_index = np.where(data["strategy"] == STRATEGY_NUMBER["energizer"])[0] + data["row_id"].iloc[0]
+        groups = groupby(enumerate(energizer_index), lambda index_value: index_value[0] - index_value[1])
+        energizer_context = [(group_items[0][1], group_items[-1][1]) for _, group_items in ((key, list(group)) for key, group in groups)]
+        revise_wrong_energizer(data, energizer_context)
     # 旧脚本在该阶段后直接收集 trial 数据，没有再对收集结果重算 strategy。
     # 失败分支保持原 strategy，成功分支由 revise_wrong_energizer 直接写成 local。
     return data
 
 
-def revise_player_view(player_view: pd.DataFrame, input_path: Path, player: str, scared_time: int) -> pd.DataFrame:
+def revise_player_view(
+    player_view: pd.DataFrame,
+    input_path: Path,
+    player: str,
+    scared_time: int,
+    *,
+    use_energizer_outcome_rule: bool = False,
+) -> pd.DataFrame:
     """对一个玩家的临时单人视角执行完整 07 修正。
 
     输入语义：player_view 已经由 prepare_player_view 映射为旧规则通用字段。
     输出语义：返回与原 player_view 行顺序一致的修正后表。
     关键约束：process_trial 内部使用原始行标签和 row_id 定位 context；因此合并所有 trial
-    后必须按原 index 排序，才能安全写回 joint-state 表。
+    后必须按原 index 排序。Energizer 结果规则默认关闭，仅由07c显式启用。
     """
 
     required_columns = {"DayTrial", "row_id", "normalized_weight", "prediction_correct", "action_dir"}
@@ -954,7 +1042,13 @@ def revise_player_view(player_view: pd.DataFrame, input_path: Path, player: str,
     all_trial_record: list[pd.DataFrame] = []
     for trial_name in trial_name_list:
         trial_data = player_view[player_view.DayTrial == trial_name].copy()
-        processed_trial = process_trial(trial_data, input_path, trial_name, scared_time)
+        processed_trial = process_trial(
+            trial_data,
+            input_path,
+            trial_name,
+            scared_time,
+            use_energizer_outcome_rule=use_energizer_outcome_rule,
+        )
         if processed_trial is not None:
             all_trial_record.append(copy.deepcopy(processed_trial))
 

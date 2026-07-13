@@ -17,6 +17,7 @@ from LoPS.calculate_utility.processing import (
     build_utility_estimation_input,
     cluster_resources_by_distance,
     correct_unavailable_q_values,
+    energizer_target_q_for_row,
     global_cluster_q_for_row,
     load_calculate_utility_maps,
     make_evade_q_non_negative,
@@ -74,6 +75,45 @@ class CalculateUtilityStatusAndNormalizationTests(unittest.TestCase):
         self.assertEqual(threshold, 2)
         self.assertEqual(one_empty_tile, [{(0, 0), (2, 0)}])
         self.assertEqual(two_empty_tiles, [{(0, 0)}, {(3, 0)}])
+
+    def test_energizer_target_utility_has_no_search_radius(self) -> None:
+        """验证远处 Energizer 仍按最短路距离减少量提供方向信息。
+
+        输入语义：构造一条长度为6的直线，Pacman 在起点，唯一 energizer 在5步外。
+        输出语义：向右的 raw utility 为正，目标 meta 使用稳定坐标且候选只有一个。
+        关键约束：测试距离故意小于真实地图但不传任何 depth；目标导向定义本身不得
+        再读取旧 ``energizer_depth`` 或因超出固定半径而返回全0。
+        """
+
+        positions = [(index, 0) for index in range(6)]
+        adjacent_map = {
+            position: {
+                "left": (position[0] - 1, 0) if position[0] > 0 else np.nan,
+                "right": (position[0] + 1, 0) if position[0] < 5 else np.nan,
+                "up": np.nan,
+                "down": np.nan,
+            }
+            for position in positions
+        }
+        distance_map = {
+            source: {target: abs(source[0] - target[0]) for target in positions}
+            for source in positions
+        }
+        map_data = MapData(adjacent_map, distance_map, {1: 2, 2: 4, 8: 8, 9: 8})
+        row = pd.Series({"pacmanPos": (0, 0), "energizers": [(5, 0)]})
+
+        raw_matrix, normalized_matrix, metadata = energizer_target_q_for_row(
+            row,
+            map_data,
+            adjacent_map,
+        )
+
+        self.assertEqual(len(raw_matrix), 1)
+        self.assertEqual(metadata[0]["target_position"], (5, 0))
+        self.assertEqual(metadata[0]["min_distance"], 5.0)
+        self.assertEqual(raw_matrix[0][1], 1.0)
+        self.assertEqual(normalized_matrix[0][1], 1.0)
+        self.assertTrue(np.isneginf(raw_matrix[0][0]))
 
     def test_tunnel_side_beans_are_not_clustered_across_two_empty_tiles(self) -> None:
         """验证 tunnel 两侧豆子不会跨越坐标 0 和 29 合并。

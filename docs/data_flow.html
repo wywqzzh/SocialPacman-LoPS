@@ -195,7 +195,7 @@
           <tr>
             <td><code>06b_fit_dynamic_strategy_event_context.py</code></td>
             <td><code>05_cluster_global_utility_data → 06_cluster_global_event_context_weight_data</code></td>
-            <td>事件硬边界、掉头/队友事件软边界、context 内 best Global，仍使用 GA 权重。</td>
+            <td>事件硬边界、队友事件软边界、context 内 best Global，仍使用 GA 权重；掉头不切段。</td>
           </tr>
           <tr>
             <td><code>06c_fit_context_strategy_posterior.py</code></td>
@@ -210,11 +210,11 @@
         <li>trial 起止、当前玩家生死变化、吃 energizer、吃 ghost 是强边界。</li>
         <li>连续吃普通豆的首尾是可抑制弱硬边界；强事件后 3 行内的吃豆开始、强事件前 3 行内的吃豆结束会被取消。</li>
         <li>长度至少 4 的 stay 默认形成硬边界；当前玩家吃 ghost 前后 5 行内的 stay 不再额外切段。</li>
-        <li>掉头和队友吃 energizer/ghost 是软边界；软边界产生的短段只在同一硬区间内合并。</li>
-        <li>普通转向、玩家到 bean 的地图距离、ghost 计时恢复不再生成 context 边界。</li>
+        <li>队友吃 energizer/ghost 是软边界；软边界产生的短段只在同一硬区间内合并。</li>
+        <li>普通转向、掉头、玩家到 bean 的地图距离、ghost 计时恢复不再生成 context 边界。</li>
       </ul>
 
-      <h3>06c-v3 posterior</h3>
+      <h3>06c-v5 posterior</h3>
       <p>
         每个玩家、tile、策略都从 raw Q 重新执行合法方向 Min-Max。策略在一个 context 内
         能区分合法方向的有效动作比例称为信息覆盖率；默认覆盖率至少 0.50 才能参与 beta
@@ -245,9 +245,14 @@
       <h3>07c posterior 修正</h3>
       <p>
         <code>07c_revise_context_strategy_posterior.py</code> 默认读取 06c，输出版本为
-        <code>07c-v6</code>。它保留原始 <code>strategy_posterior</code>、strategy 和模型 attrs，
+        <code>07c-v8</code>。它保留原始 <code>strategy_posterior</code>、strategy 和模型 attrs，
         将 posterior 仅作为人工规则的初始策略分数，结果写入
         <code>revised_strategy_score/revised_strategy/revised_strategy_name</code> 等新字段。
+      </p>
+      <p>
+        若玩家在 context 结束边界吃到 Energizer，仅当 Energizer 单策略准确率不低于
+        <code>0.70</code>，且达到该段最佳单策略准确率的 <code>0.80</code> 时，才把该段
+        修正为 Energizer。该阈值规则避免仅凭最终结果覆盖整段中的弱行为证据。
       </p>
       <p>
         revised score 可能是 one-hot 或 multi-hot，不是概率，不要求和为 1。当前“未由本玩家
@@ -301,7 +306,7 @@
       <ul>
         <li>目录存在或 pickle 数量正确，只说明文件被写出，不说明它由当前代码生成。</li>
         <li>05 数值修复后必须按同一输入重跑 05，再依次重跑 06c 和 07c。</li>
-        <li>06c 输出 attrs 的版本应为 <code>06c-v3</code>，07c 应为 <code>07c-v6</code>。</li>
+        <li>06c 输出 attrs 的版本应为 <code>06c-v5</code>，07c 应为 <code>07c-v8</code>。</li>
         <li>06c 应记录信息覆盖率阈值、epsilon、beta 模型、BIC、CV 和 Null 仅诊断标志。</li>
         <li>验证输出写入 <code>data/validation</code>，不写入 <code>.planning</code>。</li>
       </ul>

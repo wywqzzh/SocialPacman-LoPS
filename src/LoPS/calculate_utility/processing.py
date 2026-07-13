@@ -1,9 +1,9 @@
 """Social Pacman utility 的集中计算、修正和归一化流程。
 
-本模块为 corrected tile 数据中的每个玩家分别计算七个旧 hierarchical utility
-策略的 Q 值。输入是一行保存公共状态与多个玩家状态的 joint-state 表，输出仍
-保持一行 joint-state，只新增 ``p1_*_Q``、``p1_*_Q_norm``、``p2_*_Q`` 等玩家
-前缀字段，避免破坏合作/竞争分析需要的同一时刻对齐关系。
+本模块为 corrected tile 数据中的每个玩家分别计算七种行为策略的 Q 值。Global
+和 Energizer 另外保存逐行目标候选：Global 的目标是一团资源，Energizer 的目标
+是一个明确的 energizer 坐标。输入是一行保存公共状态与多个玩家状态的 joint-state
+表，输出仍保持一行 joint-state，避免破坏合作/竞争分析需要的同一时刻对齐关系。
 """
 
 from __future__ import annotations
@@ -50,8 +50,8 @@ class CalculateUtilityConfig:
     最近和最远资源团距离；global_cluster_distance_threshold 控制候选资源点的聚类半径。
     utility_config 中旧 Global 使用的 global_ignore_depth 不直接限制 cluster Global。
     输出语义：配置对象被文件级和目录级处理函数共享。
-    关键约束：当前阶段只生成逐行候选 utility，不根据 context 选择 best global；
-    best global 的选择发生在 06b。
+    关键约束：当前阶段只生成逐行候选 utility，不根据 context 选择 best Global 或
+    best Energizer；目标选择发生在后续 context 拟合阶段。
     """
 
     utility_config: UtilityConfig = UtilityConfig()
@@ -273,6 +273,54 @@ def global_cluster_q_for_row(
                 "nearest_resource": nearest_cluster_resource(position, cluster, map_data),
                 "contains_energizer": any(resource in energizer_set for resource in resources),
                 "min_distance": min_distance,
+            }
+        )
+
+    norm_matrix = [normalize_global_cluster_q(row_values).tolist() for row_values in raw_matrix]
+    return raw_matrix, norm_matrix, meta_values
+
+
+def energizer_target_q_for_row(
+    row: pd.Series,
+    map_data: MapData,
+    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
+) -> tuple[list[list[float]], list[list[float]], list[dict[str, Any]]]:
+    """为单行生成以每个剩余 energizer 为明确目标的候选 utility。
+
+    输入语义：row 是单玩家视角的一行，至少包含 ``pacmanPos`` 和 ``energizers``；
+    map_data/adjacent_map 来自统一地图常量。
+    输出语义：返回 ``目标数×4`` raw utility、对应归一化矩阵和逐目标 meta。
+    关键约束：候选不设置搜索半径。方向 utility 等于移动前后到目标的地图最短路
+    距离减少量，因此远处 energizer 也能持续提供目标导向信息；墙方向保持 ``-inf``。
+    ``target_position`` 是跨行稳定身份，不能使用每行重新编号的列表下标匹配目标。
+    """
+
+    position = parse_position(row["pacmanPos"])
+    targets = sorted(set(parse_position_list(row.get("energizers", []))))
+    raw_matrix: list[list[float]] = []
+    meta_values: list[dict[str, Any]] = []
+
+    for target_position in targets:
+        current_distance = map_distance(map_data, position, target_position)
+        raw_q = [float("-inf")] * len(DIRECTION_NAMES)
+        for direction_index, direction in enumerate(DIRECTION_NAMES):
+            adjacent_value = adjacent_map[position][direction]
+            if not isinstance(adjacent_value, tuple):
+                continue
+            next_distance = map_distance(map_data, adjacent_value, target_position)
+            if np.isfinite(current_distance) and np.isfinite(next_distance):
+                # 正值表示第一步接近目标，负值表示远离目标。最短路距离来自地图
+                # 常量，因此左右 tunnel 的连接会自然参与目标方向判断。
+                raw_q[direction_index] = current_distance - next_distance
+            else:
+                raw_q[direction_index] = 0.0
+
+        raw_matrix.append(raw_q)
+        meta_values.append(
+            {
+                "target_id": target_position,
+                "target_position": target_position,
+                "min_distance": current_distance,
             }
         )
 
@@ -674,6 +722,28 @@ def global_cluster_candidate_columns() -> tuple[str, str, str]:
     return ("global_utility_k", "global_utility_k_norm", "global_utility_k_meta")
 
 
+def energizer_target_candidate_columns() -> tuple[str, str, str]:
+    """返回05阶段新增的目标导向 Energizer 候选字段。
+
+    输入语义：无。
+    输出语义：返回 raw 候选矩阵、归一化候选矩阵和目标 meta 三个字段名。
+    关键约束：一个矩阵行只对应一个明确 energizer 坐标；05不在多个目标间做选择。
+    """
+
+    return ("energizer_utility_k", "energizer_utility_k_norm", "energizer_utility_k_meta")
+
+
+def utility_candidate_columns() -> tuple[str, ...]:
+    """返回05保存的全部逐行目标候选字段。
+
+    输入语义：无。
+    输出语义：按 Global 候选在前、Energizer 候选在后的稳定顺序返回字段。
+    关键约束：该顺序只用于初始化和写回，不表示两种策略的优先级。
+    """
+
+    return (*global_cluster_candidate_columns(), *energizer_target_candidate_columns())
+
+
 def prefixed_global_cluster_candidate_columns(player: str) -> list[str]:
     """返回某个玩家对应的 cluster global 候选字段名。
 
@@ -683,6 +753,17 @@ def prefixed_global_cluster_candidate_columns(player: str) -> list[str]:
     """
 
     return [f"{player}_{column}" for column in global_cluster_candidate_columns()]
+
+
+def prefixed_utility_candidate_columns(player: str) -> list[str]:
+    """返回某个玩家的全部逐行目标候选字段名。
+
+    输入语义：player 是 ``p1`` 或 ``p2``。
+    输出语义：返回 Global 与 Energizer 候选的玩家前缀字段。
+    关键约束：单人文件只调用现有玩家，不会创建缺失玩家的候选列。
+    """
+
+    return [f"{player}_{column}" for column in utility_candidate_columns()]
 
 
 def append_global_cluster_candidate_columns(
@@ -715,6 +796,35 @@ def append_global_cluster_candidate_columns(
     return result
 
 
+def append_energizer_target_candidate_columns(
+    data: pd.DataFrame,
+    map_data: MapData,
+    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
+) -> pd.DataFrame:
+    """为单玩家视角追加目标导向 Energizer 候选字段。
+
+    输入语义：data 是已经完成普通 Q 和 Global 候选计算的单玩家视角表。
+    输出语义：返回追加 ``energizer_utility_k*`` 三个字段的新 DataFrame。
+    关键约束：不在05内根据动作选择目标，也不把是否最终吃到 energizer 混入 utility；
+    context 级目标选择和事件结果修正分别属于06c与07c。
+    """
+
+    result = data.copy(deep=True)
+    raw_values: list[list[list[float]]] = []
+    norm_values: list[list[list[float]]] = []
+    meta_values: list[list[dict[str, Any]]] = []
+    for _, row in result.iterrows():
+        raw_matrix, norm_matrix, meta = energizer_target_q_for_row(row, map_data, adjacent_map)
+        raw_values.append(raw_matrix)
+        norm_values.append(norm_matrix)
+        meta_values.append(meta)
+
+    result["energizer_utility_k"] = raw_values
+    result["energizer_utility_k_norm"] = norm_values
+    result["energizer_utility_k_meta"] = meta_values
+    return result
+
+
 def calculate_player_utility(
     frame_data: pd.DataFrame,
     player: str,
@@ -731,7 +841,7 @@ def calculate_player_utility(
 
     row_mask = build_player_alive_mask(frame_data, player)
     output = pd.DataFrame(index=frame_data.index)
-    for column in (*prefixed_q_columns(player), *prefixed_global_cluster_candidate_columns(player)):
+    for column in (*prefixed_q_columns(player), *prefixed_utility_candidate_columns(player)):
         output[column] = pd.Series([np.nan] * len(frame_data), index=frame_data.index, dtype=object)
 
     if not row_mask.any():
@@ -756,9 +866,14 @@ def calculate_player_utility(
         adjacent_map,
         config,
     )
+    calculated_utility = append_energizer_target_candidate_columns(
+        calculated_utility,
+        map_data,
+        adjacent_map,
+    )
 
     target_indices = frame_data.index[row_mask]
-    for source_column in (*Q_COLUMNS, *Q_NORM_COLUMNS, *global_cluster_candidate_columns()):
+    for source_column in (*Q_COLUMNS, *Q_NORM_COLUMNS, *utility_candidate_columns()):
         target_column = f"{player}_{source_column}"
         # calculated_utility 已 reset index，因此这里按顺序写回原 joint 行。
         for target_index, value in zip(target_indices, calculated_utility[source_column].to_numpy()):

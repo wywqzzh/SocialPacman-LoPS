@@ -125,7 +125,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("output_dir", type=Path, help="raw_subject_data 输出目录。")
     parser.add_argument("sessions", nargs="*", help="可选：只处理这些 subject/session 文件夹名；不传则处理全部。")
     parser.add_argument("--tasks", nargs="*", default=None, help="可选：只处理这些任务目录，例如 comp coop。")
-    parser.add_argument("--workers", type=int, default=34, help="并行进程数。默认使用 CPU 数、8 和 subject 数中的较小值。")
+    parser.add_argument("--workers", type=int, default=34, help="并行进程数，默认 34；实际不会超过待处理 session 数。")
     return parser.parse_args()
 
 

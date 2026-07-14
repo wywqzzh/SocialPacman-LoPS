@@ -1,15 +1,14 @@
-"""06c：基于事件 Context 的潜在策略后验推断。
+"""基于事件 Context 推断 Social Pacman 潜在策略后验。
 
-本模块复用 06b 已验证的玩家私有事件和 context 划分，再把每段 GA 权重拟合替换为
-概率模型：先在 context 内分别选择解释动作最好的 Global cluster、Energizer 目标
+本模块在玩家级事件 context 内分别选择解释动作最好的 Global cluster、Energizer 目标
 和 Approach ghost 目标，随后统一归一化七种策略的 raw Q，通过 softmax 得到动作概率。
 context 内信息覆盖率不足的策略先被
 排除，posterior 和文件级 temperature 只使用覆盖率合格的行为策略。策略在某行的
 合法方向 Q 全相等时，使用独立于 beta 的固定无信息惩罚，避免无信息均匀预测比
 明确错误获得过多优势。合法方向均匀分布的 Null 仍只作为诊断基线。
 
-06c 与 06b 完全隔离。输入和输出仍是一份 P1/P2 时间对齐的 joint-state DataFrame，
-但 06c 不生成具有旧 GA 语义的 weight 字段。
+输入和输出均为 P1/P2 时间对齐的 joint-state DataFrame；本阶段直接保存策略 posterior，
+不生成 GA weight 字段。
 """
 
 from __future__ import annotations
@@ -27,7 +26,8 @@ import pandas as pd
 from scipy.optimize import minimize_scalar
 from scipy.special import logsumexp
 
-from LoPS.dynamic_strategy_event_context import (
+from LoPS.context_segmentation import (
+    ContextSegmentationConfig,
     append_player_event_columns,
     apply_best_global_candidates,
     build_event_context_segments,
@@ -37,12 +37,20 @@ from LoPS.dynamic_strategy_event_context import (
     positive_prediction_indices,
     q_like_zero,
 )
-from LoPS.dynamic_strategy_fitting import DEFAULT_AGENTS, DynamicStrategyFittingConfig
 
 
 DIRECTION_NAMES: tuple[str, ...] = ("left", "right", "up", "down")
 DIRECTION_TO_INDEX: dict[str, int] = {name: index for index, name in enumerate(DIRECTION_NAMES)}
 PLAYER_PREFIXES: tuple[str, ...] = ("p1", "p2")
+DEFAULT_AGENTS: tuple[str, ...] = (
+    "global",
+    "local",
+    "evade_blinky",
+    "evade_clyde",
+    "approach",
+    "energizer",
+    "no_energizer",
+)
 STRATEGY_NUMBER: dict[str, int] = {
     "global": 0,
     "local": 1,
@@ -58,7 +66,7 @@ STRATEGY_NUMBER: dict[str, int] = {
 
 @dataclass(frozen=True)
 class ContextStrategyPosteriorConfig:
-    """保存 06c context 后验拟合参数。
+    """保存 06 context 后验拟合参数。
 
     输入语义：调用方可设置 context 边界参数、beta 搜索范围、交叉验证折数和文件级
     随机种子。
@@ -172,9 +180,9 @@ class PreparedPlayerData:
     """保存单个玩家的临时视图和 context 观测。
 
     输入语义：``view`` 已完成死亡动作屏蔽与 best Global 选择；``observations`` 与
-    06b context 一一对应。
+    玩家事件 context 一一对应。
     输出语义：供文件级 beta 拟合和最终逐行写回共同使用。
-    关键约束：view 只在 06c 内部使用，不会覆盖 05 输入 DataFrame 的原始字段。
+    关键约束：view 只在 06 内部使用，不会覆盖 05 输入 DataFrame 的原始字段。
     """
 
     player: str
@@ -183,7 +191,7 @@ class PreparedPlayerData:
 
 
 def validate_config(config: ContextStrategyPosteriorConfig) -> None:
-    """验证 06c 配置参数。
+    """验证 06 配置参数。
 
     输入语义：config 是调用方构造的后验配置。
     输出语义：参数合法时无返回；不合法时抛出 ValueError。
@@ -214,7 +222,7 @@ def validate_config(config: ContextStrategyPosteriorConfig) -> None:
 
 
 def discover_posterior_players(data: pd.DataFrame, config: ContextStrategyPosteriorConfig) -> list[str]:
-    """识别拥有完整 06c 输入字段的玩家。
+    """识别拥有完整 06 输入字段的玩家。
 
     输入语义：data 是 05 cluster-global utility 表。
     输出语义：返回 ``p1``、``p2`` 中字段完整的玩家列表；单人文件自然只返回 p1。
@@ -245,7 +253,7 @@ def discover_posterior_players(data: pd.DataFrame, config: ContextStrategyPoster
         required.update(f"{player}_{agent}_Q" for agent in config.agents)
         missing = sorted(required - set(data.columns))
         if missing:
-            raise ValueError(f"{player} 06c 输入字段不完整，缺少：{missing}")
+            raise ValueError(f"{player} 06 输入字段不完整，缺少：{missing}")
         players.append(player)
     if not players:
         raise ValueError("没有找到可处理玩家，至少需要 p1_action_dir/p1_available_dir 和 raw Q 字段。")
@@ -312,11 +320,11 @@ def prepare_player_view(
     player: str,
     config: ContextStrategyPosteriorConfig,
 ) -> pd.DataFrame:
-    """构造 06c context 划分和 best Global 选择所需的单玩家视图。
+    """构造 06 context 划分和 best Global 选择所需的单玩家视图。
 
     输入语义：data 已包含玩家私有事件列；player 指定当前玩家。
     输出语义：返回保留全部前缀字段并新增通用 ``action_dir/available_dir/global_Q`` 的副本。
-    关键约束：死亡、不可用和缺失动作行会在 best Global 评分前被屏蔽，与 06b 保持一致。
+    关键约束：死亡、不可用和缺失动作行会在目标评分前被屏蔽。
     """
 
     view = data.copy(deep=True).reset_index(drop=True)
@@ -440,7 +448,7 @@ def choose_best_energizer_candidate(
     输入语义：data 已包含05候选字段；context 是半开区间；player 指定玩家。
     输出语义：返回最佳目标评分；context 起点没有 energizer 时返回 None。
     关键约束：破平依次使用概率准确率、集合准确率、较近起点距离和目标坐标。目标
-    选择只依赖 utility 与动作，不读取最终是否吃到；事件结果留给07c消除策略歧义。
+    选择只依赖 utility 与动作，不读取最终是否吃到；事件结果留给 07 消除策略歧义。
     """
 
     start, _ = context
@@ -470,7 +478,7 @@ def apply_best_energizer_candidates(
     contexts: list[tuple[int, int]],
     player: str,
 ) -> pd.DataFrame:
-    """在 context 级选择 best Energizer，并写入06c临时正式 Q。
+    """在 context 级选择 best Energizer，并写入06临时正式 Q。
 
     输入语义：data 已完成 best Global 选择；contexts 是当前玩家的完整 context 列表。
     输出语义：返回新视图，其中 ``<player>_energizer_Q`` 已替换为每段最佳目标 Q，
@@ -652,7 +660,7 @@ def apply_best_approach_candidates(
     contexts: list[tuple[int, int]],
     player: str,
 ) -> pd.DataFrame:
-    """在 context 级选择 best Approach，并写入06c临时正式 Q。
+    """在 context 级选择 best Approach，并写入06临时正式 Q。
 
     输入语义：data 已完成 Global/Energizer 目标选择；contexts 是当前玩家的完整分段。
     输出语义：返回新视图，其中 ``<player>_approach_Q`` 已替换为每段最佳 ghost 目标
@@ -709,7 +717,7 @@ def build_context_observation(
     is_stay: bool,
     config: ContextStrategyPosteriorConfig,
 ) -> ContextObservation:
-    """把一个 06b context 转换成后验模型可直接计算的观测对象。
+    """把一个玩家事件 context 转换成后验模型可直接计算的观测对象。
 
     输入语义：view 已选好 best Global；context 是全文件半开区间。
     输出语义：返回有效动作、统一归一化 Q 和 null likelihood。
@@ -786,13 +794,12 @@ def prepare_player_data(
 
     输入语义：data 是已经追加私有事件列的 joint-state 表。
     输出语义：返回临时玩家视图和按顺序排列的 ContextObservation。
-    关键约束：context 构造调用 06b 原函数；Global、Energizer、Approach 都先在完整
+    关键约束：Global、Energizer、Approach 都先在完整
     context 上选定目标，再构造统一的七策略概率观测。
     """
 
     view = prepare_player_view(data, player, config)
-    context_config = DynamicStrategyFittingConfig(
-        agents=config.agents,
+    context_config = ContextSegmentationConfig(
         stay_length=config.stay_length,
         bean_event_suppression_window=config.bean_event_suppression_window,
         ghost_stay_suppression_window=config.ghost_stay_suppression_window,
@@ -820,7 +827,7 @@ def validate_context_coverage(
 ) -> None:
     """验证一个玩家的 contexts 无重叠且完整覆盖所有 joint 行。
 
-    输入语义：observations 是按 06b context 生成的结果，row_count 是文件行数。
+    输入语义：observations 是按玩家事件 context 生成的结果，row_count 是文件行数。
     输出语义：覆盖正确时无返回；缺口、重叠或越界时抛出 RuntimeError。
     关键约束：逐行写回依赖每行恰好属于一个 context，因此不能容忍部分结果。
     """
@@ -1348,7 +1355,7 @@ def posterior_from_log_likelihood(log_likelihood: np.ndarray) -> np.ndarray:
 
 
 def initialize_player_output(index: pd.Index, player: str) -> pd.DataFrame:
-    """创建 06c 玩家级逐行输出空表。
+    """创建 06 玩家级逐行输出空表。
 
     输入语义：index 与 joint-state 输入表一致。
     输出语义：返回所有 posterior 和 best Global 字段均为 object dtype 的 DataFrame。
@@ -1540,22 +1547,22 @@ def validate_row_id(data: pd.DataFrame) -> None:
 
     输入语义：data 是 05 单文件表。
     输出语义：一致时无返回；否则抛错。
-    关键约束：06b context 使用 row_id 作为全文件 offset，错位会导致跨 trial 写回错误。
+    关键约束：context 使用 row_id 作为全文件 offset，错位会导致跨 trial 写回错误。
     """
 
     if "row_id" not in data.columns:
-        raise ValueError("06c 输入缺少 row_id。")
+        raise ValueError("06 输入缺少 row_id。")
     row_id = pd.to_numeric(data["row_id"], errors="raise").to_numpy(dtype=int)
     expected = np.arange(len(data), dtype=int)
     if not np.array_equal(row_id, expected):
-        raise ValueError("06c 要求 row_id 从 0 连续递增并与 DataFrame 行标签一致。")
+        raise ValueError("06 要求 row_id 从 0 连续递增并与 DataFrame 行标签一致。")
 
 
 def fit_context_strategy_posterior_dataframe(
     raw_data: pd.DataFrame,
     config: ContextStrategyPosteriorConfig | None = None,
 ) -> pd.DataFrame:
-    """对一个 joint-state 文件执行完整 06c 后验拟合。
+    """对一个 joint-state 文件执行完整 06 后验拟合。
 
     输入语义：raw_data 是 05 cluster-global utility 输出。
     输出语义：返回保留原字段并追加 P1/P2 posterior、strategy 和模型 attrs 的 DataFrame。
@@ -1589,7 +1596,7 @@ def fit_context_strategy_posterior_dataframe(
     # CV 信息。global_selection_uses_context_actions 显式提醒后续分析其乐观偏差来源。
     result.attrs = copy.deepcopy(raw_data.attrs)
     result.attrs["context_strategy_posterior_model"] = {
-        "version": "06c-v6",
+        "version": "strategy-posterior-v1",
         "strategy_order": list(config.agents),
         "strategy_number": {name: STRATEGY_NUMBER[name] for name in config.agents},
         "normalization": "per_player_tile_strategy_legal_direction_minmax_from_raw_q",
@@ -1603,7 +1610,7 @@ def fit_context_strategy_posterior_dataframe(
         "no_information_penalty": config.no_information_penalty,
         "null_model": "uniform_over_legal_actions_diagnostic_only",
         "null_participates_in_beta_or_posterior": False,
-        "global_selection_rule": "06b_context_probability_accuracy",
+        "global_selection_rule": "context_probability_accuracy",
         "global_selection_uses_context_actions": True,
         "energizer_utility_rule": "target_shortest_path_distance_reduction_without_radius",
         "energizer_selection_rule": "context_probability_accuracy_by_target_position",
@@ -1640,8 +1647,8 @@ def process_context_strategy_posterior_file(
     """处理并保存一个 05 utility 文件。
 
     输入语义：input_path/output_path 是对应的嵌套 pickle 路径；file_index 派生 CV seed。
-    输出语义：保存 06c DataFrame，并返回便于 CLI 汇总的轻量摘要。
-    关键约束：输出目录可与旧 06 并存，绝不覆盖 06b 默认目录。
+    输出语义：保存 06 DataFrame，并返回便于 CLI 汇总的轻量摘要。
+    关键约束：输出目录必须与输入 utility 目录分离，避免覆盖上游数据。
     """
 
     base_config = ContextStrategyPosteriorConfig() if config is None else config
@@ -1686,7 +1693,7 @@ def process_context_strategy_posterior_directory(
     config: ContextStrategyPosteriorConfig | None = None,
     workers: int = 1,
 ) -> list[dict[str, Any]]:
-    """按嵌套任务目录批量执行 06c。
+    """按嵌套任务目录批量执行 06。
 
     输入语义：input_dir 包含 ``comp/*.pkl``、``coop/*.pkl``，workers 控制文件级进程数。
     输出语义：保持相对目录结构保存并返回所有文件摘要。
@@ -1717,7 +1724,7 @@ def process_context_strategy_posterior_directory(
 def _process_posterior_task(
     task: tuple[Path, Path, ContextStrategyPosteriorConfig, int],
 ) -> dict[str, Any]:
-    """执行目录级进程池中的单文件 06c 任务。"""
+    """执行目录级进程池中的单文件 06 任务。"""
 
     input_path, output_path, config, file_index = task
     return process_context_strategy_posterior_file(

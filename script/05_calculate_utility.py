@@ -43,8 +43,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=data_root / "05_cluster_global_utility_data",
-        help="集中 utility 输出目录。",
+        default=data_root / "05_utility_data",
+        help="七策略 utility 与候选目标输出目录。",
     )
     parser.add_argument(
         "--constant-dir",
@@ -55,12 +55,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1), help="文件级并行进程数。")
     parser.add_argument("--randomness-coeff", type=float, default=0.0, help="Q 随机扰动系数。")
     parser.add_argument("--laziness-coeff", type=float, default=0.0, help="沿用上一方向的惰性系数。")
-    parser.add_argument("--global-depth", type=int, default=15, help="Global 策略深度参数。")
+    parser.add_argument(
+        "--global-depth",
+        type=int,
+        default=15,
+        help="保留参数：当前正式 Global 与 Cluster Global 均不读取该值，修改它不会改变输出。",
+    )
     parser.add_argument(
         "--global-ignore-depth",
         type=int,
         default=10,
-        help="旧 Global 区域搜索的近距离 bean 忽略深度；不限制 cluster Global。",
+        help="保留参数：当前正式 Global 的近距离阈值固定为 10，Cluster Global 也不读取该值。",
     )
     parser.add_argument(
         "--global-cluster-min-distance",

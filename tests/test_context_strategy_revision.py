@@ -1,28 +1,16 @@
-"""验证 07/07c 人工策略修正的短 context 规则。"""
+"""验证 07 人工策略修正的短 context 规则。"""
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 import unittest
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT_PATH = PROJECT_ROOT / "script" / "07_revise_human_weight.py"
-MODULE_NAME = "test_revise_human_weight_module"
-SPEC = importlib.util.spec_from_file_location(MODULE_NAME, SCRIPT_PATH)
-if SPEC is None or SPEC.loader is None:
-    raise ImportError(f"无法加载 07 修正脚本：{SCRIPT_PATH}")
-REVISION = importlib.util.module_from_spec(SPEC)
-sys.modules[MODULE_NAME] = REVISION
-SPEC.loader.exec_module(REVISION)
+from LoPS import context_strategy_revision as REVISION
 
 
-class ReviseHumanWeightTests(unittest.TestCase):
+class ContextStrategyRevisionTests(unittest.TestCase):
     """覆盖短 vague 段的比例门槛和并列策略优先级。"""
 
     def test_energizer_followup_approach_accepts_exactly_point_seventy_five(self) -> None:

@@ -1,76 +1,71 @@
 # LoPS
 
-LoPS 是 Social Pacman 行为数据分析流程的重构仓库。当前代码以 `01–04` 作为共享
-预处理上游；`05` 之后同时保留历史 GA 流程、range utility 实验流程、cluster-global
-事件 context 流程，以及当前的 context 策略后验流程。因此，仓库已经不是一条简单的
-`01 → 12` 直线流水线。
+LoPS 是 Social Pacman 双人/单人行为数据分析流程。仓库当前只保留一条正式的
+`01 → 07` 数据链路，并使用嵌套目录 `data/<stage>/<task>/<session>.pkl` 保存结果。
 
-当前 01–07 的 joint-state 数据按 `data/<stage>/<task>/<session>.pkl` 组织，例如
-`data/04_corrected_tile_data/comp/<session>.pkl`。阶段信息位于目录名中，文件名保持
-session 名称。
+## 正式数据流
 
-## 主要目录
-
-- `src/LoPS/`：可复用正式模块。
-- `script/`：分析入口；数字后缀 `b/c` 表示同阶段的独立实验分支。
-- `script/pacman_video/`：逐 frame 渲染和 tile 结果检查入口。
-- `data/`：输入、中间结果、验证结果和视频产物；本地已有文件不等于已完成当前版本重跑。
-- `docs/`：算法说明和审计记录。
-- `.planning/`：历史规划与代码库快照，不作为当前运行接口的唯一依据。
-
-## 当前数据流
-
-### 共享上游
-
-| 阶段 | 脚本 | 默认输入 | 默认输出 |
+| 阶段 | 入口 | 默认输入 | 默认输出 |
 |---:|---|---|---|
 | 01 | `script/01_mat_to_raw_subject_data.py` | `data/00_raw_mat_data` | `data/01_raw_subject_data` |
 | 02 | `script/02_raw_subject_data_to_frame_data.py` | `data/01_raw_subject_data` | `data/02_frame_data` |
 | 03 | `script/03_frame_data_preprocess.py` | `data/02_frame_data` | `data/03_preprocessed_frame_data` |
-| 04 | `script/04_human_tile_data_preprocess.py` | `data/03_preprocessed_frame_data` | `data/04_tile_data`, `data/04_corrected_tile_data` |
+| 04 | `script/04_human_tile_data_preprocess.py` | `data/03_preprocessed_frame_data` | `data/04_tile_data`、`data/04_corrected_tile_data` |
+| 05 | `script/05_calculate_utility.py` | `data/04_corrected_tile_data` | `data/05_utility_data` |
+| 06 | `script/06_fit_context_strategy_posterior.py` | `data/05_utility_data` | `data/06_strategy_posterior_data` |
+| 07 | `script/07_revise_context_strategy.py` | `data/06_strategy_posterior_data` | `data/07_revised_strategy_data` |
 
-04 不做固定间隔抽帧，也不插入人工路径点。它先按 P1/P2 的位置与 mode、两只 ghost
-的位置保留联合状态变化候选帧，再在默认 13 帧窗口内压缩多对象异步换 tile 产生的
-冗余候选帧，并重新计算玩家动作与合法性。
+05 为每位玩家计算七种正式策略的四方向 raw Q，同时额外保存 Cluster Global、
+逐 Energizer 和逐 Ghost Approach 候选 utility。正式 Q 与候选 utility 是不同算法；
+06 在玩家 context 内先从三类候选中分别选择解释当前动作最好的目标，再拟合文件级
+beta 并计算七策略 posterior。07 保留模型 posterior，另行写入事件规则修正后的策略
+分数和标签。
 
-### 05–07 分支
+## 环境与地图常量
 
-| 分支 | 脚本与默认目录 | 当前语义 |
-|---|---|---|
-| Cluster-global utility | `05_calculate_utility.py`: `04_corrected_tile_data → 05_cluster_global_utility_data` | 当前 05 默认入口；保存七策略 Q，并为 Global 保存多个资源团候选。 |
-| Range utility | `05b_calculate_range_utility.py`: `04_corrected_tile_data → 05_range_utility_data` | 基于地图距离、半径和衰减的独立实验 utility。 |
-| 历史 GA | `06_dynamic_strategy_fitting.py`: `05_utility_data → 06_weight_data`；`07_revise_human_weight.py`: `06_weight_data → 07_corrected_weight_data` | 保留的 GA 权重拟合与人工修正接口。 |
-| 事件 context GA | `06b_fit_dynamic_strategy_event_context.py`: `05_cluster_global_utility_data → 06_cluster_global_event_context_weight_data` | 使用玩家私有硬边界、掉头/队友事件软边界和 context 内 best Global；仍拟合 GA 权重。其输出可显式传给 `07_revise_human_weight.py`。 |
-| Context 后验 | `06c_fit_context_strategy_posterior.py`: `05_cluster_global_utility_data → 06c_context_strategy_posterior_data`；`07c_revise_context_strategy_posterior.py`: `06c_context_strategy_posterior_data → 07c_context_strategy_posterior_corrected_data` | 当前概率模型分支；按信息覆盖率筛选策略，拟合文件级 beta，保存 posterior；07c 另存人工规则标签，不覆盖原 posterior。 |
+`pyproject.toml` 当前只声明核心数值依赖。地图生成和视频入口还直接需要
+`networkx`、`imageio` 与 `imageio-ffmpeg`；运行测试需要 `pytest`。在 LDS 环境中应
+先确认这些包已经安装。08–12 历史阶段还额外使用 `scikit-learn`。
 
-`05_cluster_global_utility_data`、`06c_context_strategy_posterior_data` 和
-`07c_context_strategy_posterior_corrected_data` 中现有本地文件是在 2026-07-11 的
-05 数值修复之前生成的。重新执行 05→06c→07c 前，不应把这些文件视为修复后的最终结果。
+`data/constant_data/map_constants.pkl` 被 `data/.gitignore` 排除，不随仓库分发。首次
+运行 04、05 或 tile 视频前，需要用当前内置地图重新生成：
 
-### 08–12 历史下游
+```bash
+PYTHONPATH=src python script/constant_map/generate_map_constants.py --workers 8
+```
 
-`08_extract_features_human.py` 到 `12_divide_person.py` 仍保留原编号和默认目录，但 08
-仍扫描扁平 `*.pkl` 并读取历史无玩家前缀的单人字段，尚未为 06b/06c 的嵌套双人前缀
-字段和 07c posterior/revised 字段建立正式适配。因此它们不是当前 06c→07c 分支的
-已贯通下游。
+## 视频检查
 
-## 视频流程
+当前只保留 tile 策略视频入口：
 
-仓库提供两种互不依赖的渲染方式：
+```bash
+PYTHONPATH=src python script/pacman_video/run_tile_video_renderer.py \
+  --task comp \
+  --session <session>.pkl \
+  --trial <DayTrial> \
+  --save-frames
+```
 
-- 逐 frame 展示：`run_render_table.py → run_frame_renderer.py → run_video_renderer.py`，
-  默认读取 `data/02_frame_data` 与 `data/pacman_video/grammar_data`。
-- tile 结果检查：`run_tile_video_renderer.py`，直接读取 07 类结果和
-  `data/constant_data/map_constants.pkl`。默认仍指向历史
-  `data/07_corrected_weight_data`；检查 07c 时必须显式传入
-  `--tile-root data/07c_context_strategy_posterior_corrected_data`。
+默认读取 `data/07_revised_strategy_data`，视频和图片分别写入
+`data/pacman_video/tile_video` 与 `data/pacman_video/tile_frame_images`。
+当前视频入口要求输入同时包含 P1/P2 的策略来源字段，因此只能直接绘制双人结果；
+主分析流程本身仍支持不补 P2 列的单人文件。视频为完整显示 Ghost House 内部，会在
+分析地图常量之外额外把固定鬼屋内部格子画成白色背景，该显示补充不会修改分析图结构。
 
-## 环境与运行约束
+## 运行约束
 
-- Python 版本为 `>=3.10,<3.11`；正式依赖以 `pyproject.toml` 为准。
-- `scikit-learn`（09、grammar）、`networkx`（地图常量生成）、`imageio`（tile 视频）和
-  `pytest`（部分测试）被代码直接使用，但当前未写入 `pyproject.toml`，运行对应入口前需另行安装。
-- 所有正式默认路径都位于当前仓库 `data/`；正式模块不得读取旧项目绝对路径。
-- 不要并行覆盖同一输出目录。调试 05/06b/06c/07c 时优先使用 `--single-file`。
-- 当前准确运行命令、分支选择和下游限制见 `data/README.md`；详细算法见
-  `docs/data_flow.html` 和 `docs/context_strategy_posterior_inference.md`。
+- Python 版本为 `>=3.10,<3.11`，当前数据使用 LDS 环境生成。
+- 正式 01–07 链路使用 `task/session.pkl` 嵌套结构；单人数据不补空的 P2 字段。01、02
+  底层仍保留扁平目录兼容分支，但该输出不能直接交给只接受嵌套目录的 03，因此不属于
+  正式连续流程。
+- 地图信息统一读取 `data/constant_data/map_constants.pkl`，业务阶段不得再次修正地图。
+- 调试 05–07 时优先使用 `--single-file task/session.pkl`，验证后再执行目录级并行。
+- 08–12 暂时保留供后续改造，但尚未形成从当前 07 输出开始的贯通流程。主要入口 08
+  仍读取历史字段、扁平目录和两个旧 CSV 地图文件；09–12 已有部分当前结构接口，但
+  仍依赖 08 的输出，不能视为当前正式链路。
+- 09–11 的部分集成测试依赖被 `data/.gitignore` 排除的本地 fixture；fixture 不存在时
+  pytest 会跳过这些用例。因此“其余测试通过”不能单独证明 08–12 链路已经贯通。
+
+更具体的运行命令见 `data/README.md`；当前策略生成的精简说明见
+`docs/current_strategy_generation.md`，完整后验细节见
+`docs/context_strategy_posterior_inference.md`。

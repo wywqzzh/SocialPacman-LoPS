@@ -7,7 +7,7 @@
 1. ghost 状态在进入 utility 估计器前被错误转换为浮点数，随后又被风险函数当作缺失状态处理；
 2. Evade 和 NoEnergizer 的归一化会原地修改 raw Q，导致保存字段的实际语义与字段名不一致。
 
-这两个问题会继续影响 06b/06c 的 context 策略拟合、文件级参数估计、07/07c 的策略修正及最终视频标签。2026-07-11 已完成业务代码修复和独立目录验证；正式 05 输出及其下游结果尚未覆盖重跑，因此现有正式数据仍属于修复前结果。
+这两个问题会继续影响 06 的 context 策略拟合、文件级参数估计、07 的策略修正及最终视频标签。2026-07-11 完成业务代码修复，2026-07-14 已从 05 开始重新生成当前正式数据及其下游结果。
 
 ## 2. 审计范围
 
@@ -17,11 +17,15 @@
 - `src/LoPS/hierarchical_utility/model.py`
 - `src/LoPS/hierarchical_utility/strategies.py`
 
-全量数值差分使用当前 05 目录中的唯一文件：
+全量数值差分以当前 05 目录中的以下 comp 文件为代表样例：
 
 ```text
-data/05_cluster_global_utility_data/comp/10001-10022-2025-07-15-JJJ-1.pkl
+data/05_utility_data/comp/10001-10022-2025-07-15-JJJ-1.pkl
 ```
+
+当前 05 目录还包含 coop 文件
+`data/05_utility_data/coop/10001-10005-2025-07-10-HHH-1.pkl`；“唯一文件”不再是
+当前数据目录的事实。
 
 对应的 04 输入为：
 
@@ -105,7 +109,7 @@ ghost_status[ghost_index] > 3
 视频图片：
 
 ```text
-data/pacman_video/tile_frame_images_06c_posterior_corrected/comp/
+data/pacman_video/tile_frame_images/comp/
 10001-10022-2025-07-15-JJJ-1/
 02-01-10001-10022-2025-07-15-JJJ/000035.png
 ```
@@ -143,7 +147,7 @@ Q_{\mathrm{approach}}^{\mathrm{raw}}
 [1.2203,\ 0,\ -\infty,\ 1.1667].
 $$
 
-按照 06c 的合法方向逐行 Min-Max 规则归一化后约为：
+按照 06 的合法方向逐行 Min-Max 规则归一化后约为：
 
 $$
 \widetilde Q_{\mathrm{approach}}
@@ -218,7 +222,7 @@ q_values[available_indices] = q_values[available_indices] - offset
 
 ### 4.3 对当前下游的影响
 
-NoEnergizer 当前采用的是对所有合法方向统一减去相同 offset。06c 随后重新执行逐行 Min-Max，因此平移本身通常不会改变 06c 的归一化结果。
+NoEnergizer 当前采用的是对所有合法方向统一减去相同 offset。06 随后重新执行逐行 Min-Max，因此平移本身通常不会改变 06 的归一化结果。
 
 但是该行为仍是数据结构错误：
 
@@ -227,17 +231,16 @@ NoEnergizer 当前采用的是对所有合法方向统一减去相同 offset。0
 - 任何使用绝对 utility、跨行尺度或重新归一化的方法都会读取到被改写的数据；
 - 修复 Evade 后，相同问题会扩展到 Evade raw Q。
 
-因此该问题必须与状态类型 Bug 一起修复，不能因为当前 06c 对平移不敏感而保留。
+因此该问题必须与状态类型 Bug 一起修复，不能因为当前 06 对平移不敏感而保留。
 
 ## 5. 对下游结果的影响
 
 受影响的数据阶段包括：
 
 1. 05 保存的 ghost 相关 Q；
-2. 06b 基于 Q_norm 的 context 策略拟合；
-3. 06c 基于 raw Q 重新归一化后的 likelihood、posterior 和文件级 beta；
-4. 07/07c 使用单策略预测准确率进行的策略修正；
-5. 使用 07/07c 数据生成的策略视频。
+2. 06 基于 raw Q 统一归一化后的 likelihood、posterior 和文件级 beta；
+3. 07 使用单策略预测准确率进行的策略修正；
+4. 使用 07 数据生成的策略视频。
 
 即使某个 context 中 Global Q 本身正确，其他候选策略 Q 的错误仍会改变：
 
@@ -245,9 +248,9 @@ NoEnergizer 当前采用的是对所有合法方向统一减去相同 offset。0
 - posterior 的相对大小；
 - `vague` 判定；
 - 文件级共享或独立 beta 的估计与 BIC；
-- 07c 的修正候选和最终策略名称。
+- 07 的修正候选和最终策略名称。
 
-因此不能只修补 0-based 第 35 帧或 07c 标签，必须从 05 开始重新计算。
+因此不能只修补 0-based 第 35 帧或 07 标签，必须从 05 开始重新计算。
 
 ## 6. 已排除的问题
 
@@ -310,11 +313,12 @@ normalized_input = np.asarray(q_values, dtype=float).copy()
 4. 验证两套 Evade 不再全零；
 5. 验证 0-based 第 35 帧 P2 Approach 左方向不再为 0；
 6. 验证保存的 raw Q 与归一化前估计器输出一致；
-7. 重新运行 06c，检查 beta、BIC、posterior 和 context 写回；
-8. 重新运行 07c；
+7. 重新运行 06，检查 beta、BIC、posterior 和 context 写回；
+8. 重新运行 07；
 9. 重新生成视频并复查关键 context。
 
-如果仍使用 06b/07 的 GA 结果，也必须从修复后的 05 数据重新运行，不能继续使用现有输出。
+当前正式 06 已使用 context posterior 与文件级 beta，不再生成 GA 权重。任何由旧 05
+数据派生的 posterior、07 修正结果和视频都必须从修复后的 05 重新运行，不能继续沿用。
 
 ## 9. 修复实现与验证结果
 
@@ -339,7 +343,8 @@ PYTHONPATH=src /home/zzh/anaconda3/envs/LDS/bin/python -m pytest \
   tests/test_calculate_utility_status_and_normalization.py -q
 ```
 
-结果为 `7 passed`。同时执行现有 06c 核心测试，结果为 `9 passed`。
+该命令在修复当时得到 `7 passed`。截至 2026-07-14，当前 05 utility 专项测试集合已
+扩展，重新执行结果为 `19 passed`；历史数字只用于说明最初修复的验收状态。
 
 ### 9.3 单文件正式入口验证
 
@@ -350,9 +355,11 @@ PYTHONPATH=src /home/zzh/anaconda3/envs/LDS/bin/python -m pytest \
 | 输入/输出行数 | 6439/6439 |
 | P1 计算/跳过 | 6407/32 |
 | P2 计算/跳过 | 6421/18 |
-| 输出列数 | 55 |
+| 当前输出列数 | 67 |
 
-输出行数、索引、列顺序、DataFrame attrs 和所有非 Q 输入字段均与修复前完全一致。
+当前 67 列包含后续新增的双玩家 Energizer 与 Approach 候选字段。最初修复 ghost 状态
+与 raw Q 污染问题时，输出行数、索引、当时已有列的顺序、DataFrame attrs 和所有非 Q
+输入字段保持一致；新增候选字段属于后续正式方法演进，不应再用旧 55 列 schema 验收。
 
 ### 9.4 Bug 修复验证
 
@@ -393,4 +400,5 @@ $$
 
 两个 Bug 已在业务代码中修复，并通过单元测试、真实关键帧和完整单文件 05 正式入口验证。修复后的结果满足预期，且未发现新的数值异常或无关字段变化。
 
-当前 `data/05_cluster_global_utility_data` 以及现有 06c/07c 数据仍是修复前生成的正式结果。确认重新执行前，不应把这些旧结果视为修复后的最终分析数据。
+当前 `data/05_utility_data`、`data/06_strategy_posterior_data` 和
+`data/07_revised_strategy_data` 均来自修复后的正式流程。

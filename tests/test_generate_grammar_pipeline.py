@@ -15,12 +15,20 @@ from LoPS.generate_grammar.config import (
 )
 from LoPS.generate_grammar.data import load_state_dependency_graph, load_strategy_state_data
 from LoPS.generate_grammar.pipeline import prepare_strategy_state_data, process_strategy_state_file
-from tests.generate_grammar_fixtures import STATE_GRAPH_DIR, STRATEGY_SEQUENCE_DIR
+from tests.generate_grammar_fixtures import (
+    HAS_REPRESENTATIVE_GRAMMAR_INPUTS,
+    STATE_GRAPH_DIR,
+    STRATEGY_SEQUENCE_DIR,
+)
 
 
 class GenerateGrammarPipelineTest(unittest.TestCase):
     """覆盖 generate_grammar 的文件级 pipeline 编排行为。"""
 
+    @unittest.skipUnless(
+        HAS_REPRESENTATIVE_GRAMMAR_INPUTS,
+        "保留的 08–12 集成测试数据尚未生成",
+    )
     def test_prepare_strategy_state_data_removes_n_and_aligns_state_features(self) -> None:
         """验证预处理会删除 N token 并同步对齐状态特征行。"""
         # prepare 阶段必须保证 token_sequence 与 state_features 等长，否则后续状态条件会错位。
@@ -36,6 +44,10 @@ class GenerateGrammarPipelineTest(unittest.TestCase):
         self.assertEqual(len(prepared.token_sequence), len(prepared.state_features))
         self.assertTrue(len(prepared.n_positions) > 0)
 
+    @unittest.skipUnless(
+        HAS_REPRESENTATIVE_GRAMMAR_INPUTS,
+        "保留的 08–12 集成测试数据尚未生成",
+    )
     def test_process_strategy_state_file_returns_structured_output_only(self) -> None:
         """验证单文件处理返回结构化输出并包含核心分区字段。"""
         # 单文件处理不写真实输出目录，使用临时目录配置只验证内存结果结构。

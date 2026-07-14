@@ -1,5 +1,5 @@
-"""Pacman 视频生成模块。
+"""Pacman tile 策略视频的共享支持包。
 
-本包读取 Pacman frame table 和 grammar/model 标注，生成渲染表、图片帧和视频。
+当前视频入口直接读取 07 revised strategy 数据；角色和地图绘制逻辑位于入口脚本，
+本包仅保留后续可复用组件的命名空间。
 """
-

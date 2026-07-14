@@ -13,7 +13,11 @@ import pandas as pd
 from LoPS.generate_grammar.config import DEFAULT_STATE_NAMES
 from LoPS.generate_grammar.data import load_state_dependency_graph, load_strategy_state_data
 from LoPS.structure_learning import bd_score, count_state_combinations, learn_condition_effect_links
-from tests.generate_grammar_fixtures import STATE_GRAPH_DIR, STRATEGY_SEQUENCE_DIR
+from tests.generate_grammar_fixtures import (
+    HAS_REPRESENTATIVE_GRAMMAR_INPUTS,
+    STATE_GRAPH_DIR,
+    STRATEGY_SEQUENCE_DIR,
+)
 
 
 def _build_real_condition_link_inputs() -> tuple[np.ndarray, np.ndarray, dict[int, list[int]], int, int, int, list[list[int]]]:
@@ -106,6 +110,10 @@ class GenerateGrammarScoringTest(unittest.TestCase):
         self.assertEqual(actual_score, expected_score)
         np.testing.assert_array_equal(actual_posterior, expected_posterior)
 
+    @unittest.skipUnless(
+        HAS_REPRESENTATIVE_GRAMMAR_INPUTS,
+        "保留的 08–12 集成测试数据尚未生成",
+    )
     def test_learn_state_condition_links_matches_legacy_learn_bayes_net_block(self) -> None:
         """验证真实数据下状态条件链接学习输出固定邻接矩阵。"""
         # 真实文件测试使用迁移后的 LoPS/data 输入，并比较固定输出快照。

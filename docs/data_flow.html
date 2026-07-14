@@ -3,349 +3,75 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LoPS 当前数据流程</title>
+  <title>Social Pacman 数据流程</title>
   <style>
-    :root {
-      color-scheme: light;
-      --ink: #172033;
-      --muted: #5f6b7a;
-      --line: #d9e0e8;
-      --panel: #f6f8fb;
-      --blue: #2855a6;
-      --amber: #8a5700;
-      --amber-bg: #fff7df;
-      --green: #176b4d;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      color: var(--ink);
-      background: #fff;
-      font: 16px/1.7 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-    .layout { display: grid; grid-template-columns: 270px minmax(0, 1fr); min-height: 100vh; }
-    nav {
-      position: sticky;
-      top: 0;
-      height: 100vh;
-      overflow: auto;
-      padding: 28px 22px;
-      border-right: 1px solid var(--line);
-      background: var(--panel);
-    }
-    nav h1 { margin: 0 0 6px; font-size: 1.25rem; }
-    nav p { margin: 0 0 20px; color: var(--muted); font-size: .9rem; }
-    nav a { display: block; padding: 6px 0; color: var(--blue); text-decoration: none; }
-    main { width: min(1080px, 100%); padding: 46px 52px 80px; }
-    h1, h2, h3 { line-height: 1.3; }
-    h2 { margin-top: 52px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
-    h3 { margin-top: 30px; }
-    code {
-      padding: .12em .35em;
-      border-radius: 4px;
-      background: #eef2f7;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: .92em;
-    }
-    pre { overflow: auto; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: #111827; color: #f3f4f6; }
-    pre code { padding: 0; background: transparent; color: inherit; }
-    table { width: 100%; border-collapse: collapse; margin: 18px 0 28px; }
-    th, td { padding: 10px 12px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
-    th { background: var(--panel); }
-    .hero { padding: 26px 30px; border: 1px solid var(--line); border-radius: 12px; background: linear-gradient(135deg, #f5f8ff, #fff); }
-    .hero h1 { margin-top: 0; }
-    .note, .warning, .ok { margin: 18px 0; padding: 14px 18px; border-left: 4px solid var(--blue); background: #f3f7ff; }
-    .warning { border-left-color: var(--amber); background: var(--amber-bg); }
-    .ok { border-left-color: var(--green); background: #effaf5; }
-    .flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 18px 0; }
-    .flow span { padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
-    .flow b { color: var(--muted); }
-    @media (max-width: 840px) {
-      .layout { display: block; }
-      nav { position: static; width: auto; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
-      main { padding: 30px 20px 60px; }
-    }
+    body { max-width: 1080px; margin: 36px auto; padding: 0 24px; color: #202124; font: 16px/1.65 sans-serif; }
+    h1, h2 { color: #111; }
+    table { width: 100%; border-collapse: collapse; margin: 18px 0 30px; }
+    th, td { border: 1px solid #d7d7d7; padding: 9px 11px; text-align: left; vertical-align: top; }
+    th { background: #f3f4f5; }
+    code { background: #f3f4f5; padding: 2px 5px; }
+    pre { overflow-x: auto; background: #16181d; color: #f5f5f5; padding: 16px; }
+    .flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 20px 0; }
+    .flow span { border: 1px solid #b7bcc4; padding: 7px 10px; background: #fafafa; }
   </style>
 </head>
 <body>
-<div class="layout">
-  <nav>
-    <h1>LoPS 数据流程</h1>
-    <p>按 2026-07-12 当前代码核对</p>
-    <a href="#overview">总览</a>
-    <a href="#shared">01–04 共享上游</a>
-    <a href="#utility">05 / 05b Utility</a>
-    <a href="#fit">06 / 06b / 06c 拟合</a>
-    <a href="#revision">07 / 07c 修正</a>
-    <a href="#downstream">08–12 下游状态</a>
-    <a href="#video">视频流程</a>
-    <a href="#validity">结果有效性</a>
-    <a href="#commands">运行入口</a>
-  </nav>
+  <h1>Social Pacman 正式数据流程</h1>
+  <p>仓库只保留一条 01–07 正式流程。各阶段使用嵌套的
+    <code>data/&lt;stage&gt;/&lt;task&gt;/&lt;session&gt;.pkl</code>，单人文件不补空 P2 字段。</p>
 
-  <main>
-    <header class="hero" id="overview">
-      <h1>Social Pacman 当前数据处理流程</h1>
-      <p>
-        当前仓库以 01–04 为共享预处理上游，05 之后保留多条并行研究分支。
-        编号表示处理阶段，不表示所有带相邻编号的目录已经自动兼容。
-      </p>
-      <div class="flow" aria-label="current posterior flow">
-        <span>01–04 共享预处理</span><b>→</b>
-        <span>05 Cluster Global</span><b>→</b>
-        <span>06c Context Posterior</span><b>→</b>
-        <span>07c 规则标签</span>
-      </div>
-      <div class="warning">
-        08–12 仍使用历史 07 字段结构，尚未正式接入 06c/07c。现有 05 cluster-global、
-        06c 和 07c 本地文件也生成于 2026-07-11 的 05 数值修复之前，不能视为当前代码的最终结果。
-      </div>
-    </header>
+  <div class="flow">
+    <span>00 MAT</span><b>→</b><span>01 raw</span><b>→</b><span>02 frame</span><b>→</b>
+    <span>03 preprocess</span><b>→</b><span>04 tile</span><b>→</b><span>05 utility</span><b>→</b>
+    <span>06 posterior</span><b>→</b><span>07 revision</span><b>→</b><span>tile video</span>
+  </div>
 
-    <section id="shared">
-      <h2>01–04：共享上游</h2>
-      <table>
-        <thead><tr><th>阶段</th><th>默认输入</th><th>默认输出</th><th>核心处理</th></tr></thead>
-        <tbody>
-          <tr>
-            <td>01</td><td><code>00_raw_mat_data</code></td><td><code>01_raw_subject_data</code></td>
-            <td>按 task/session 读取 MATLAB 原始数据，整理为逐 trial pickle；默认 34 个 worker。</td>
-          </tr>
-          <tr>
-            <td>02</td><td><code>01_raw_subject_data</code></td><td><code>02_frame_data</code></td>
-            <td>构造 joint-state frame 表、统一坐标与玩家字段、过滤当前分析不支持的 trial；默认 8 个 worker，可选 CSV。</td>
-          </tr>
-          <tr>
-            <td>03</td><td><code>02_frame_data</code></td><td><code>03_preprocessed_frame_data</code></td>
-            <td>选择分析字段、标准化资源/位置/状态列，保留逐 frame 时序。</td>
-          </tr>
-          <tr>
-            <td>04</td><td><code>03_preprocessed_frame_data</code></td>
-            <td><code>04_tile_data</code><br><code>04_corrected_tile_data</code></td>
-            <td>先按 P1/P2 的位置与 mode、两只 ghost 的位置提取联合状态变化候选帧，再压缩异步换 tile 区间，最后重算每位玩家的动作与合法性。</td>
-          </tr>
-        </tbody>
-      </table>
+  <h2>阶段接口</h2>
+  <table>
+    <thead><tr><th>阶段</th><th>入口</th><th>输入</th><th>输出</th></tr></thead>
+    <tbody>
+      <tr><td>01</td><td><code>01_mat_to_raw_subject_data.py</code></td><td><code>00_raw_mat_data</code></td><td><code>01_raw_subject_data</code></td></tr>
+      <tr><td>02</td><td><code>02_raw_subject_data_to_frame_data.py</code></td><td><code>01_raw_subject_data</code></td><td><code>02_frame_data</code></td></tr>
+      <tr><td>03</td><td><code>03_frame_data_preprocess.py</code></td><td><code>02_frame_data</code></td><td><code>03_preprocessed_frame_data</code></td></tr>
+      <tr><td>04</td><td><code>04_human_tile_data_preprocess.py</code></td><td><code>03_preprocessed_frame_data</code></td><td><code>04_tile_data</code>、<code>04_corrected_tile_data</code></td></tr>
+      <tr><td>05</td><td><code>05_calculate_utility.py</code></td><td><code>04_corrected_tile_data</code></td><td><code>05_utility_data</code></td></tr>
+      <tr><td>06</td><td><code>06_fit_context_strategy_posterior.py</code></td><td><code>05_utility_data</code></td><td><code>06_strategy_posterior_data</code></td></tr>
+      <tr><td>07</td><td><code>07_revise_context_strategy.py</code></td><td><code>06_strategy_posterior_data</code></td><td><code>07_revised_strategy_data</code></td></tr>
+    </tbody>
+  </table>
 
-      <h3>04 的实际语义</h3>
-      <p>
-        <code>04_tile_data</code> 在每个 trial 内比较 P1/P2 的位置与 mode，以及 ghost1、
-        ghost2 的位置。第一帧保留；之后只有这些联合采样字段发生变化的帧才保留。
-        <code>ifscared</code>、豆子和 energizer 变化本身不触发候选帧。
-      </p>
-      <p>
-        <code>04_corrected_tile_data</code> 以默认 13 帧作为异步切换窗口，在不破坏所有对象
-        空间连续性和 Pacman 独有短暂 mode 状态的前提下删除冗余中间候选。它不采用
-        “每 25 帧取一行”，也不
-        插入推测的中间路径点。动作字段为 <code>p1_action_dir/p2_action_dir</code>，合法性字段为
-        <code>p1_available_dir/p2_available_dir</code>；单人文件不补 P2 列。
-      </p>
-      <p class="note">
-        04 读取的是 <code>constant_data/map_constants.pkl</code> 中的 <code>adjacent_map</code>，
-        不是旧说明中的独立 <code>adjacent_map_fmri.csv</code>。更详细的压缩理由见
-        <code>docs/04_tile_sampling_issue_solution.md</code>。
-      </p>
-    </section>
+  <h2>关键处理</h2>
+  <p><b>02：</b>修正 Pacman/Ghost 坐标、统一 frame 字段，并整 trial 删除出现
+    Ghost3/Ghost4 的非 two-ghost 数据。</p>
+  <p><b>03：</b>选择正式分析字段并统一类型，不再执行 trial 过滤。</p>
+  <p><b>04：</b>先保留 P1/P2 坐标与 mode、两只 Ghost 坐标的联合状态变化候选帧，再在 13 frame
+    异步切换窗口内删除不破坏全对象连续性的中间候选，并重算动作方向。</p>
+  <p><b>05：</b>计算七种正式策略的四方向 raw Q，并额外保存三类目标候选。正式 Global
+    是四方向区域内距离大于 10 的普通豆计数；Cluster Global 将普通豆和 Energizer
+    按地图最短路聚类。Energizer 候选按单颗能量豆计算，Approach 候选按单只非 dead
+    Ghost 计算。正式 Q 和候选 utility 不是同一算法。</p>
+  <p><b>06：</b>为每位玩家独立检测事件并划分 context，在每段选择解释动作最好的目标，
+    对合法方向 Q 做 Min-Max，使用 softmax likelihood 拟合文件级 beta 并计算策略 posterior。</p>
+  <p><b>07：</b>不覆盖模型 posterior；结合事件结果和单策略方向证据，追加 revised score、
+    revised strategy 和诊断字段。</p>
 
-    <section id="utility">
-      <h2>05 / 05b：Utility 分支</h2>
+  <h2>视频</h2>
+  <pre>PYTHONPATH=src python script/pacman_video/run_tile_video_renderer.py \
+  --task comp --session &lt;session&gt;.pkl --trial &lt;DayTrial&gt; --save-frames</pre>
+  <p>默认读取 <code>data/07_revised_strategy_data</code>，MP4 输出到
+    <code>data/pacman_video/tile_video/&lt;task&gt;/</code>，逐帧 PNG 输出到
+    <code>data/pacman_video/tile_frame_images/&lt;task&gt;/&lt;session&gt;/&lt;trial&gt;/</code>。
+    帧号统一使用 0-based，context 显示为闭区间。</p>
 
-      <h3>05 Cluster-global hierarchical utility（当前默认）</h3>
-      <p>
-        <code>script/05_calculate_utility.py</code> 默认读取 <code>04_corrected_tile_data</code>，
-        输出到 <code>05_cluster_global_utility_data</code>。每位玩家保存七种策略的四方向 raw Q
-        和 Q_norm；Global 还保存资源团候选矩阵及 meta，供 06b/06c 在 context 内选择 best Global。
-      </p>
-      <table>
-        <thead><tr><th>参数</th><th>默认值</th><th>含义</th></tr></thead>
-        <tbody>
-          <tr><td><code>global_cluster_min_distance</code></td><td>2</td><td>距离 0/1 的单个资源不参与本行 Global 距离计算；同团距离至少为 2 的资源仍保留。</td></tr>
-          <tr><td><code>global_cluster_radius</code></td><td>60</td><td>可进入 Cluster Global 的最远资源团距离。</td></tr>
-          <tr><td><code>global_cluster_distance_threshold</code></td><td>2</td><td>资源点聚类的地图距离阈值；允许豆子之间存在一个空格。</td></tr>
-          <tr><td><code>local_depth</code></td><td>10</td><td>Local 路径树深度。</td></tr>
-          <tr><td><code>evade_depth</code></td><td>6</td><td>正常 ghost 的即时威胁搜索深度。</td></tr>
-          <tr><td><code>approach_depth</code></td><td>20</td><td>追逐非危险 ghost 的搜索深度。</td></tr>
-          <tr><td><code>approach_discount_factor</code></td><td>0.95</td><td>最佳追鬼命中路径的距离衰减系数。</td></tr>
-          <tr><td><code>energizer_depth / no_energizer_depth</code></td><td>10 / 8</td><td>两种 energizer 相关路径深度。</td></tr>
-          <tr><td><code>randomness_coeff / laziness_coeff</code></td><td>0 / 0</td><td>默认关闭扰动与惯性，保证可复现。</td></tr>
-        </tbody>
-      </table>
-      <p>
-        近距离过滤作用于资源团内部的单个资源，而不是整个 cluster。完整
-        <code>resource_positions</code> 继续用于跨行匹配；Q 只使用
-        <code>global_resource_positions</code>。因此一颗距离 0/1 的眼前豆由 Local 表达，
-        但不会让同一资源团中距离至少为 2 的远豆全部失去 Global 信息。
-      </p>
-      <p>
-        2026-07-11 已修复 ghost 状态被有限 float 误判为缺失，以及 Q_norm 生成过程原地改写
-        raw Q 的问题。详细数值影响和验证见 <code>docs/05_utility_numeric_bug_audit.md</code>。
-      </p>
+  <h2>地图准备</h2>
+  <p><code>map_constants.pkl</code> 不随仓库分发。首次运行 04、05 或视频前执行：</p>
+  <pre>PYTHONPATH=src python script/constant_map/generate_map_constants.py --workers 8</pre>
+  <p>生成器需要 <code>networkx</code>；视频入口还需要 <code>imageio</code> 和
+    <code>imageio-ffmpeg</code>。这些依赖当前未写入 <code>pyproject.toml</code>。</p>
 
-      <h3>05b Range utility（独立实验）</h3>
-      <p>
-        <code>script/05b_calculate_range_utility.py</code> 默认输出 <code>05_range_utility_data</code>，
-        使用地图距离、策略半径、衰减系数和奖励/惩罚计算方向 utility。它不是 05 的别名，
-        继续进入 06 类脚本时必须显式指定输入与输出目录。
-      </p>
-    </section>
-
-    <section id="fit">
-      <h2>06 / 06b / 06c：三种拟合接口</h2>
-      <table>
-        <thead><tr><th>入口</th><th>默认目录</th><th>模型与 context</th></tr></thead>
-        <tbody>
-          <tr>
-            <td><code>06_dynamic_strategy_fitting.py</code></td>
-            <td><code>05_utility_data → 06_weight_data</code></td>
-            <td>历史动态切段与 GA 七策略权重；默认 seed 20260610、GA 种群 100、迭代 500。</td>
-          </tr>
-          <tr>
-            <td><code>06b_fit_dynamic_strategy_event_context.py</code></td>
-            <td><code>05_cluster_global_utility_data → 06_cluster_global_event_context_weight_data</code></td>
-            <td>玩家事件与公共吃鬼硬边界、队友 Energizer 软边界、context 内 best Global，仍使用 GA 权重；掉头不切段。</td>
-          </tr>
-          <tr>
-            <td><code>06c_fit_context_strategy_posterior.py</code></td>
-            <td><code>05_cluster_global_utility_data → 06c_context_strategy_posterior_data</code></td>
-            <td>沿用 06b context/best Global，改为七个潜在策略的 context posterior 和文件级 beta。</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <h3>06b/06c 的 context 边界</h3>
-      <ul>
-        <li>trial 起止、当前玩家生死变化、当前玩家吃 Energizer、任一玩家吃 ghost 是强边界。</li>
-        <li>连续吃普通豆的首尾是可抑制弱硬边界；强事件后 3 行内的吃豆开始、强事件前 3 行内的吃豆结束会被取消。</li>
-        <li>长度至少 4 的 stay 默认形成硬边界；任一玩家吃 ghost 前后 5 行内的 stay 不再额外切段。</li>
-        <li>队友吃 Energizer 是软边界；任一玩家吃 ghost 是双方不可合并的公共强边界。</li>
-        <li>普通转向、掉头、玩家到 bean 的地图距离、ghost 计时恢复不再生成 context 边界。</li>
-      </ul>
-
-      <h3>06c-v5 posterior</h3>
-      <p>
-        每个玩家、tile、策略都从 raw Q 重新执行合法方向 Min-Max。策略在一个 context 内
-        能区分合法方向的有效动作比例称为信息覆盖率；默认覆盖率至少 0.50 才能参与 beta
-        和 posterior。合格策略内部使用均匀先验。posterior 阈值默认为 0.70。
-      </p>
-      <p>
-        文件内比较 P1/P2 共享一个 beta 与各自一个 beta 的结构，并用有效 player-context
-        数量计算 BIC。按完整 <code>DayTrial</code> 做最多 5 折 grouped CV；CV 只用于诊断，
-        最终参数仍由全文件重拟合和 BIC 决定。beta 默认搜索范围为 [0.05, 20]，网格大小 81。
-      </p>
-      <p class="note">
-        Null 模型是在合法方向上均匀随机动作的诊断基线，不参与 beta、BIC、posterior 或
-        候选策略。context 有动作但所有策略 coverage 均不足时，posterior 为七个 0、
-        candidate 为 <code>none</code>、策略标签为 <code>vague</code>。
-      </p>
-    </section>
-
-    <section id="revision">
-      <h2>07 / 07c：规则修正</h2>
-      <h3>07 历史 GA 修正</h3>
-      <p>
-        <code>07_revise_human_weight.py</code> 默认读取 <code>06_weight_data</code>。它在 joint-state
-        表中分别映射 P1/P2 的 normalized weight、私有事件和 Q_norm，执行 vague、energizer、
-        scared-time 等人工规则，并新增玩家前缀的 revised 字段与策略编号。06b 输出可通过显式
-        <code>--input-dir</code> 传给该入口。
-      </p>
-
-      <h3>07c posterior 修正</h3>
-      <p>
-        <code>07c_revise_context_strategy_posterior.py</code> 默认读取 06c，输出版本为
-        <code>07c-v8</code>。它保留原始 <code>strategy_posterior</code>、strategy 和模型 attrs，
-        将 posterior 仅作为人工规则的初始策略分数，结果写入
-        <code>revised_strategy_score/revised_strategy/revised_strategy_name</code> 等新字段。
-      </p>
-      <p>
-        若玩家在 context 结束边界吃到 Energizer，仅当 Energizer 单策略准确率不低于
-        <code>0.70</code>，且达到该段最佳单策略准确率的 <code>0.80</code> 时，才把该段
-        修正为 Energizer。该阈值规则避免仅凭最终结果覆盖整段中的弱行为证据。
-      </p>
-      <p>
-        revised score 可能是 one-hot 或 multi-hot，不是概率，不要求和为 1。当前“未由本玩家
-        吃到 ghost 就否定 Approach”的二次修正规则已停用；attrs 会记录
-        <code>legacy_rule_order_reused=False</code> 与
-        <code>uneaten_ghost_approach_revision_enabled=False</code>。
-      </p>
-    </section>
-
-    <section id="downstream">
-      <h2>08–12：保留但未接入 posterior 分支</h2>
-      <table>
-        <thead><tr><th>阶段</th><th>默认接口</th><th>当前限制</th></tr></thead>
-        <tbody>
-          <tr><td>08</td><td><code>07_corrected_weight_data → 08_feature_data / 08_discrete_feature_data</code></td><td rowspan="5">08 仍扫描扁平 <code>*.pkl</code> 并读取历史无前缀的单人权重、strategy 和位置字段；没有正式的嵌套 07c 双人 posterior/revised 字段适配与一致性验证。</td></tr>
-          <tr><td>09</td><td><code>08_discrete_feature_data → 09_* / 09_strategy_sequence</code></td></tr>
-          <tr><td>10</td><td><code>09_strategy_sequence → 10_state_dependency_graph_data</code></td></tr>
-          <tr><td>11</td><td><code>09_strategy_sequence + 10_* → 11_grammar</code></td></tr>
-          <tr><td>12</td><td><code>11_grammar → stdout JSON</code></td></tr>
-        </tbody>
-      </table>
-      <div class="warning">
-        不要把 <code>07c_context_strategy_posterior_corrected_data</code> 直接作为 08 输入。
-        在增加独立适配层并验证前，08–12 只能被描述为历史下游接口，而不是当前 posterior
-        分支的完成状态。
-      </div>
-    </section>
-
-    <section id="video">
-      <h2>视频流程</h2>
-      <h3>逐 frame 渲染</h3>
-      <div class="flow">
-        <span>02_frame_data + grammar_data</span><b>→</b>
-        <span>run_render_table.py</span><b>→</b>
-        <span>run_frame_renderer.py</span><b>→</b>
-        <span>run_video_renderer.py</span>
-      </div>
-      <p>该链路用于逐帧展示，最终合成 MP4 需要系统可调用 <code>ffmpeg</code>。</p>
-
-      <h3>Tile 结果检查</h3>
-      <p>
-        <code>run_tile_video_renderer.py</code> 直接读取 07 类 tile 表和
-        <code>constant_data/map_constants.pkl</code>，不依赖 render table 或 grammar。其默认
-        tile root 仍为历史 <code>07_corrected_weight_data</code>；查看 07c 时必须显式指定
-        <code>--tile-root data/07c_context_strategy_posterior_corrected_data</code>。
-      </p>
-    </section>
-
-    <section id="validity">
-      <h2>结果有效性与版本边界</h2>
-      <ul>
-        <li>目录存在或 pickle 数量正确，只说明文件被写出，不说明它由当前代码生成。</li>
-        <li>05 数值修复后必须按同一输入重跑 05，再依次重跑 06c 和 07c。</li>
-        <li>06c 输出 attrs 的版本应为 <code>06c-v5</code>，07c 应为 <code>07c-v8</code>。</li>
-        <li>06c 应记录信息覆盖率阈值、epsilon、beta 模型、BIC、CV 和 Null 仅诊断标志。</li>
-        <li>验证输出写入 <code>data/validation</code>，不写入 <code>.planning</code>。</li>
-      </ul>
-      <div class="ok">
-        当前方法细节以 <code>docs/context_strategy_posterior_inference.md</code> 为准；05 修复证据
-        以 <code>docs/05_utility_numeric_bug_audit.md</code> 为准。
-      </div>
-    </section>
-
-    <section id="commands">
-      <h2>常用运行入口</h2>
-      <pre><code># 共享上游
-PYTHONPATH=src python script/01_mat_to_raw_subject_data.py
-PYTHONPATH=src python script/02_raw_subject_data_to_frame_data.py
-PYTHONPATH=src python script/03_frame_data_preprocess.py
-PYTHONPATH=src python script/04_human_tile_data_preprocess.py
-
-# 当前 posterior 分支：先用 --single-file 验证，再批量运行
-PYTHONPATH=src python script/05_calculate_utility.py --single-file comp/&lt;session&gt;.pkl --workers 1
-PYTHONPATH=src python script/06c_fit_context_strategy_posterior.py --single-file comp/&lt;session&gt;.pkl --workers 1
-PYTHONPATH=src python script/07c_revise_context_strategy_posterior.py --single-file comp/&lt;session&gt;.pkl --processes 1
-
-# 07c tile 视频检查
-PYTHONPATH=src python script/pacman_video/run_tile_video_renderer.py \
-  --tile-root data/07c_context_strategy_posterior_corrected_data \
-  --task comp --session &lt;session&gt;.pkl --trial &lt;DayTrial&gt; --save-frames</code></pre>
-      <p>
-        完整目录说明、分支命令和可选依赖见 <code>data/README.md</code>。脚本参数若再次变化，
-        应以对应入口的 <code>--help</code> 和配置 dataclass 为直接接口证据。
-      </p>
-    </section>
-  </main>
-</div>
+  <h2>当前边界</h2>
+  <p>08–12 代码暂时保留，但不属于已贯通流程。08 仍读取历史字段、扁平目录和旧 CSV
+    地图；09–12 已有部分当前结构接口，但仍依赖 08 输出。接入工作应先从 08 开始。</p>
 </body>
 </html>

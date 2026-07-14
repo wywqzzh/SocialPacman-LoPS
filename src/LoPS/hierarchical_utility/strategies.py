@@ -105,7 +105,7 @@ class SharedPathUtilityEngine:
             for _ in PATH_Q_COLUMNS
         ]
         # Local 与 Approach 都表达玩家会选择一条可执行的最佳目标路径，因此额外保存
-        # 每个首方向的最大叶路径奖励。其余策略继续使用叶路径均值。
+        # 每个首方向的最大叶路径奖励。其余路径策略继续使用叶路径均值。
         self.leaf_max_utility: list[list[float]] = [
             [-np.inf for _ in DIRECTIONS]
             for _ in PATH_Q_COLUMNS
@@ -116,8 +116,8 @@ class SharedPathUtilityEngine:
 
         输入语义：return_trace 控制是否返回每个策略、每个初始方向的叶节点统计。
         输出语义：默认返回 Q 列名到四方向 Q 向量的字典；trace 模式额外返回 leaf 统计。
-        关键约束：Local 聚合最大叶路径 utility，其余策略聚合叶路径均值；方向顺序
-        固定为 left/right/up/down。
+        关键约束：Local 和 Approach 聚合最大叶路径 utility，其余路径策略聚合叶路径
+        均值；方向顺序固定为 left/right/up/down。
         """
 
         self._construct_shared_tree()

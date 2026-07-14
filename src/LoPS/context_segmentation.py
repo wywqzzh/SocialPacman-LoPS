@@ -1,42 +1,57 @@
-"""事件硬边界版 Social Pacman 动态策略拟合。
+"""构造 Social Pacman 玩家级事件 context。
 
-本模块是 06 动态策略拟合的实验新版。它复用旧 06 的权重拟合器和输出字段，
-只替换 context 划分方式：先按玩家行为事件与公共吃鬼事件生成不可跨越的硬边界，
-再把队友吃 Energizer 造成的公共环境变化作为软边界，最后在不跨硬边界的前提下
-合并软边界造成的过短段。玩家掉头只作为段内动作参与策略 likelihood，不再触发
-context 切分。
+本模块只负责事件字段、候选目标选择和 context 划分，不包含历史 GA 权重拟合。
+划分过程先生成不可跨越的玩家事件硬边界，再处理队友 Energizer 引起的软边界，
+最后在不跨硬边界的条件下合并过短段落。玩家掉头只作为段内动作证据，不产生边界。
 """
 
 from __future__ import annotations
 
 import ast
-import copy
-import pickle
-from concurrent.futures import ProcessPoolExecutor
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from LoPS.dynamic_strategy_fitting import (
-    DEFAULT_AGENTS,
-    DynamicStrategyFittingConfig,
-    all_directions_nan,
-    discover_player_prefixes,
-    fit_all_segments,
-    initialize_player_result,
-    prepare_fitting_dataframe,
-)
-OPPOSITE_DIRECTIONS: dict[str, str] = {
-    "left": "right",
-    "right": "left",
-    "up": "down",
-    "down": "up",
-}
+
 DIRECTION_NAMES: tuple[str, ...] = ("left", "right", "up", "down")
 DIRECTION_TO_INDEX: dict[str, int] = {direction: index for index, direction in enumerate(DIRECTION_NAMES)}
 PLAYER_PREFIXES: tuple[str, ...] = ("p1", "p2")
+
+
+@dataclass(frozen=True)
+class ContextSegmentationConfig:
+    """保存事件 context 划分所需的最小配置。
+
+    输入语义：三个整数分别控制长 stay 判定、豆子事件抑制窗口和吃鬼附近 stay
+    抑制窗口。
+    输出语义：不可变配置会传入每个玩家的 context 构造过程。
+    关键约束：这里只保留划分阶段真正使用的参数，不携带任何拟合器或 GA 参数。
+    """
+
+    stay_length: int = 4
+    bean_event_suppression_window: int = 3
+    ghost_stay_suppression_window: int = 5
+
+
+def all_directions_unavailable(
+    data: pd.DataFrame,
+    context: tuple[int, int],
+) -> bool:
+    """判断一个 context 是否没有可用于策略推断的动作。
+
+    输入语义：data 是单个 trial 的玩家临时视图，context 是局部位置半开区间。
+    输出语义：动作方向全部缺失或全部被标记为不可用时返回 True。
+    关键约束：死亡、重置和非法方向行必须保留在 joint-state 表中，但不能被当作
+    有效动作，因此同时检查 ``action_dir`` 和 ``available_dir``。
+    """
+
+    start, end = context
+    segment = data.iloc[start:end]
+    direction_available = segment["action_dir"].apply(lambda value: isinstance(value, str))
+    legal_action = segment["available_dir"].astype(bool)
+    return not bool((direction_available & legal_action).any())
 
 
 def parse_position_collection(value: Any) -> list[Any]:
@@ -290,7 +305,7 @@ def choose_best_global_candidate(
 
     输入语义：data 是单玩家拟合临时表，context 是半开区间，player 是 ``p1`` 或 ``p2``。
     输出语义：返回 best cluster 的评分字典；没有候选时返回 None。
-    关键约束：best 选择发生在 GA 拟合前，后续拟合仍只看到一个普通 ``global_Q_norm``。
+    关键约束：best 选择发生在策略后验计算前，后续模型只看到一个选定的 Global Q。
     破平顺序为概率准确率、集合准确率、cluster size、起点距离、cluster_id。
     """
 
@@ -327,8 +342,7 @@ def apply_best_global_candidates(
 ) -> pd.DataFrame:
     """在 context 级选择 best global，并覆盖正式 global Q 字段。
 
-    输入语义：data 是 ``prepare_fitting_dataframe`` 生成的单玩家临时表，contexts 是
-    已经划分好的全局半开区间。
+    输入语义：data 是当前玩家的临时推断视图，contexts 是已经划分好的全局半开区间。
     输出语义：返回新 DataFrame，其中 ``global_Q/global_Q_norm`` 和玩家前缀
     ``<player>_global_Q/<player>_global_Q_norm`` 均已替换为 best cluster 候选。
     关键约束：如果输入没有 05 cluster global 候选字段，本函数保持原 global Q 不变，
@@ -336,9 +350,8 @@ def apply_best_global_candidates(
     """
 
     result = data.copy(deep=True)
-    # prepare_fitting_dataframe 为 GA 只构造了 ``global_Q_norm`` 这类归一化列；
-    # cluster global 预处理还需要同步替换 raw ``global_Q``，因此这里从玩家前缀
-    # 字段补出临时无前缀列，保持后续写回逻辑集中。
+    # 目标选择需要同时替换 raw 与 normalized Global Q，因此从玩家前缀字段补出
+    # 临时无前缀列，保持后续写回逻辑集中。
     prefixed_global_column = f"{player}_global_Q"
     prefixed_global_norm_column = f"{player}_global_Q_norm"
     if "global_Q" not in result.columns and prefixed_global_column in result.columns:
@@ -407,8 +420,8 @@ def append_player_event_columns(data: pd.DataFrame, players: list[str]) -> pd.Da
     输入语义：data 是 05 utility 输出表，players 是实际存在的玩家前缀。
     输出语义：返回追加 ``p1_eat_bean/p1_eat_energizer/p1_eat_ghost`` 等列的副本。
     关键约束：事件列标在事件发生后的到达行。也就是说，若第 i 行动作让玩家在
-    第 i+1 行吃到资源，则第 i+1 行对应玩家事件为 True。06b/06c 的 context 边界
-    必须直接使用这个事件行，不能回推到动作行；07 的策略归因可按自身规则另行读取
+    第 i+1 行吃到资源，则第 i+1 行对应玩家事件为 True。context 边界必须直接使用
+    这个事件行，不能回推到动作行；策略归因可按自身规则另行读取
     前一动作，但不得反向改变事件位置的定义。
     """
 
@@ -785,26 +798,6 @@ def hard_boundary_points(
     return {boundary for boundary in boundaries if 0 <= boundary <= row_count}
 
 
-def soft_turnaround_points(trial_data: pd.DataFrame) -> set[int]:
-    """生成掉头位置，供诊断分析使用。
-
-    输入语义：trial_data 是单 trial 临时表，``action_dir`` 已经把非法方向置为 NaN。
-    输出语义：返回局部行号集合。
-    关键约束：该函数不再参与正式 context 划分，只保留用于行为诊断和A/B比较；
-    NaN 过渡仍使用前一个有效方向作为参照，便于稳定识别动作反转位置。
-    """
-
-    boundaries: set[int] = set()
-    previous_direction: str | None = None
-    for index, direction in enumerate(trial_data["action_dir"].tolist()):
-        if not isinstance(direction, str):
-            continue
-        if previous_direction is not None and OPPOSITE_DIRECTIONS.get(previous_direction) == direction:
-            boundaries.add(index)
-        previous_direction = direction
-    return boundaries
-
-
 def soft_teammate_event_points(trial_data: pd.DataFrame, player: str) -> set[int]:
     """生成队友吃 Energizer 对应的公共环境软边界。
 
@@ -874,12 +867,12 @@ def merge_soft_short_contexts(
 def build_event_context_segments(
     prepared_data: pd.DataFrame,
     player: str,
-    config: DynamicStrategyFittingConfig | None = None,
+    config: ContextSegmentationConfig | None = None,
 ) -> tuple[list[tuple[int, int]], list[bool]]:
     """按玩家事件、公共吃鬼硬边界和队友 Energizer 软边界构造 context。
 
-    输入语义：prepared_data 是 ``prepare_fitting_dataframe`` 生成的玩家临时表，
-    player 是当前拟合玩家。
+    输入语义：prepared_data 是包含通用动作列和玩家事件列的临时视图，player 是
+    当前拟合玩家。
     输出语义：返回全局 row_id 半开区间列表，以及每个区间是否为 stay/all-NaN 段。
     关键约束：短段合并只发生在同一硬边界区间内部，绝不跨 trial、吃豆段、生死、
     本人 energizer、任一玩家吃 ghost 或长 stay 硬边界。软边界只来自队友的
@@ -887,7 +880,7 @@ def build_event_context_segments(
     普通豆的距离和 ghost 计时恢复都不再生成 context 边界。
     """
 
-    config = DynamicStrategyFittingConfig() if config is None else config
+    config = ContextSegmentationConfig() if config is None else config
     all_contexts: list[tuple[int, int]] = []
     all_is_nan: list[bool] = []
 
@@ -922,208 +915,6 @@ def build_event_context_segments(
 
         for start, end in trial_contexts:
             all_contexts.append((start + level_offset, end + level_offset))
-            all_is_nan.append(all_directions_nan(trial_data, (start, end)))
+            all_is_nan.append(all_directions_unavailable(trial_data, (start, end)))
 
     return all_contexts, all_is_nan
-
-
-def fit_player_strategy_event_context_dataframe(
-    raw_data: pd.DataFrame,
-    player: str,
-    config: DynamicStrategyFittingConfig,
-) -> pd.DataFrame:
-    """使用事件 context 为单个玩家拟合动态策略权重。
-
-    输入语义：raw_data 是 05 utility joint-state 表，player 指定当前玩家。
-    输出语义：返回 ``<player>_weight``、``<player>_trial_context`` 等 06 兼容字段。
-    关键约束：context 划分后会先选择每段 best cluster global，并覆盖临时表中的
-    ``global_Q/global_Q_norm``；段落拟合、权重归一化和 07 所需输出字段保持原接口。
-    best global 直接读取 05 已生成的候选 utility，06b 不再为 context 读取地图距离。
-    """
-
-    if config.random_seed is not None:
-        np.random.seed(config.random_seed)
-
-    print(f"=== Event Context Dynamic Strategy Fitting: {player} ====")
-    fit_data = prepare_fitting_dataframe(raw_data, player, config)
-    suffix = "_Q_norm"
-    invalid_direction_indices = np.where(fit_data["available_dir"] == False)[0]
-    fit_data.loc[fit_data.index[invalid_direction_indices], "action_dir"] = [np.nan] * len(invalid_direction_indices)
-
-    contexts, is_nan = build_event_context_segments(fit_data, player, config)
-    fit_data = apply_best_global_candidates(fit_data, contexts, player)
-    result_list, _, is_correct, predicted_direction, is_vague = fit_all_segments(
-        fit_data,
-        contexts,
-        is_nan,
-        config,
-        suffix=suffix,
-    )
-
-    output = initialize_player_result(raw_data.index, player)
-    trial_weight: list[Any] = []
-    trial_context: list[tuple[int, int]] = []
-    trial_normalized_weight: list[Any] = []
-    trial_is_stay: list[bool] = []
-    for result_index, result in enumerate(result_list):
-        weight = np.asarray(result[: len(config.agents)], dtype=float)
-        start = result[-2]
-        end = result[-1]
-        for _ in range(start, end):
-            trial_context.append((start, end))
-            trial_weight.append(weight.tolist())
-            trial_is_stay.append(is_nan[result_index])
-            if is_nan[result_index] is False and np.sum(weight) != 0 and np.max(weight) != np.min(weight):
-                normalized_weight = (weight - np.min(weight)) / (np.max(weight) - np.min(weight))
-                trial_normalized_weight.append(normalized_weight.tolist())
-            else:
-                trial_normalized_weight.append(copy.deepcopy(weight.tolist()))
-
-    if len(trial_weight) != fit_data.shape[0]:
-        raise RuntimeError(
-            f"{player} event-context 拟合结果长度不一致："
-            f"weights={len(trial_weight)}, rows={fit_data.shape[0]}"
-        )
-
-    output[f"{player}_weight"] = trial_weight
-    output[f"{player}_normalized_weight"] = trial_normalized_weight
-    output[f"{player}_prediction_correct"] = is_correct
-    output[f"{player}_predict_dir"] = predicted_direction
-    output[f"{player}_trial_context"] = trial_context
-    output[f"{player}_is_stay"] = trial_is_stay
-    output[f"{player}_is_vague"] = is_vague
-    # 06b 在 context 级选出的 best global 是后续 07 和视频解释真正使用的
-    # global utility，因此把覆盖后的正式 global_Q/global_Q_norm 写回玩家前缀字段。
-    for source_column, target_column in (
-        ("global_Q", f"{player}_global_Q"),
-        ("global_Q_norm", f"{player}_global_Q_norm"),
-        ("best_global_cluster_id", f"{player}_best_global_cluster_id"),
-        ("best_global_cluster_prob_accuracy", f"{player}_best_global_cluster_prob_accuracy"),
-        ("best_global_cluster_set_accuracy", f"{player}_best_global_cluster_set_accuracy"),
-        ("best_global_cluster_meta", f"{player}_best_global_cluster_meta"),
-    ):
-        if source_column in fit_data.columns:
-            output[target_column] = fit_data[source_column].to_numpy()
-    print(np.sum(is_vague) / len(fit_data))
-    print(f"Finished event-context fitting {player}.")
-    return output
-
-
-def fit_dynamic_strategy_event_context_dataframe(
-    raw_data: pd.DataFrame,
-    config: DynamicStrategyFittingConfig | None = None,
-) -> pd.DataFrame:
-    """对单个 joint-state 表执行事件 context 版动态策略拟合。
-
-    输入语义：raw_data 是 05 utility 输出表。
-    输出语义：返回保留原字段并追加 p1/p2 权重字段的 DataFrame。
-    关键约束：输出字段完全兼容 07；新增逻辑只影响 ``*_trial_context`` 和拟合权重。
-    """
-
-    config = DynamicStrategyFittingConfig() if config is None else config
-    base = raw_data.reset_index(drop=True).copy(deep=True)
-    players = discover_player_prefixes(base, config)
-    result = append_player_event_columns(base, players)
-    for player in players:
-        player_output = fit_player_strategy_event_context_dataframe(result, player, config)
-        for column in player_output.columns:
-            result[column] = player_output[column].to_numpy()
-    return result
-
-
-def process_dynamic_strategy_event_context_file(
-    input_path: str | Path,
-    output_path: str | Path,
-    config: DynamicStrategyFittingConfig | None = None,
-    file_index: int = 0,
-) -> dict[str, Any]:
-    """处理单个 05 utility 文件并保存事件 context 版 06 输出。
-
-    输入语义：input_path 是 05 utility pickle，output_path 是目标 06b pickle。
-    输出语义：写出事件 context 版 WeightData，并返回摘要。
-    关键约束：若设置 random_seed，会按文件序号派生 seed，保持文件级并行可复现。
-    """
-
-    config = DynamicStrategyFittingConfig() if config is None else config
-    input_file = Path(input_path)
-    output_file = Path(output_path)
-    with input_file.open("rb") as file:
-        raw_data = pickle.load(file)
-
-    if config.random_seed is not None:
-        file_config = DynamicStrategyFittingConfig(
-            agents=config.agents,
-            stay_length=config.stay_length,
-            ga_population_size=config.ga_population_size,
-            ga_iterations=config.ga_iterations,
-            ga_mutation_probability=config.ga_mutation_probability,
-            ga_precision=config.ga_precision,
-            weight_penalty=config.weight_penalty,
-            vague_accuracy_threshold=config.vague_accuracy_threshold,
-            random_seed=config.random_seed + file_index,
-            segment_workers=config.segment_workers,
-            use_segment_seed=config.use_segment_seed,
-            bean_event_suppression_window=config.bean_event_suppression_window,
-            ghost_stay_suppression_window=config.ghost_stay_suppression_window,
-            min_effective_action_count=config.min_effective_action_count,
-            min_effective_action_ratio=config.min_effective_action_ratio,
-        )
-    else:
-        file_config = config
-
-    result = fit_dynamic_strategy_event_context_dataframe(raw_data, file_config)
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    with output_file.open("wb") as file:
-        pickle.dump(result, file)
-    print("Finished saving event-context data.")
-    return {
-        "input_file": str(input_file),
-        "output_file": str(output_file),
-        "rows": int(result.shape[0]),
-        "columns": int(result.shape[1]),
-        "seed": file_config.random_seed,
-    }
-
-
-def process_dynamic_strategy_event_context_directory(
-    input_dir: str | Path,
-    output_dir: str | Path,
-    config: DynamicStrategyFittingConfig | None = None,
-    workers: int = 1,
-) -> list[dict[str, Any]]:
-    """批量处理嵌套目录中的 05 utility 文件。
-
-    输入语义：input_dir 是 ``comp/*.pkl``、``coop/*.pkl`` 结构，output_dir 是 06b 输出根目录。
-    输出语义：按相同相对路径保存并返回摘要列表。
-    关键约束：文件级并行和段落级并行不要同时开太大；单文件调试时建议只开段落级并行。
-    """
-
-    config = DynamicStrategyFittingConfig() if config is None else config
-    input_dir = Path(input_dir)
-    output_dir = Path(output_dir)
-    input_files = sorted(path for path in input_dir.glob("*/*.pkl") if path.is_file())
-    if not input_files:
-        raise FileNotFoundError(f"输入目录中没有嵌套 pickle 文件：{input_dir}")
-
-    tasks = [
-        (
-            input_file,
-            output_dir / input_file.relative_to(input_dir),
-            config,
-            file_index,
-        )
-        for file_index, input_file in enumerate(input_files)
-    ]
-    if workers <= 1:
-        return [_process_event_context_task(task) for task in tasks]
-    with ProcessPoolExecutor(max_workers=min(workers, len(tasks))) as executor:
-        return list(executor.map(_process_event_context_task, tasks))
-
-
-def _process_event_context_task(
-    task: tuple[Path, Path, DynamicStrategyFittingConfig, int],
-) -> dict[str, Any]:
-    """执行目录级并行中的单文件事件 context 拟合任务。"""
-
-    input_path, output_path, config, file_index = task
-    return process_dynamic_strategy_event_context_file(input_path, output_path, config, file_index=file_index)

@@ -50,10 +50,11 @@ class CompiledMapData:
 
 @dataclass(frozen=True)
 class UtilityConfig:
-    """保存 hierarchical utility 预计算的所有可调参数。
+    """保存 hierarchical utility 预计算的配置字段。
 
-    输入语义：调用方可覆盖旧脚本中写死的深度、阈值、随机和惰性系数。
-    输出语义：策略构造时从该配置读取参数，默认值复现 fMRI 目标路径。
+    输入语义：调用方可覆盖当前路径搜索实际消费的深度、衰减、随机和惰性系数；
+    Global 深度、Global ignore depth 和各策略 ghost threshold 仍为历史保留字段。
+    输出语义：策略构造时只读取实现明确消费的字段；保留字段不会改变当前 Q。
     关键约束：默认随机系数和惰性系数均为 0，因此保存的 Q 值不受随机数影响。
     Local 默认使用 0.90 的逐步奖励衰减：第 j 步资源奖励乘以 ``0.9**(j-1)``，
     使更直接到达的最佳路径优于绕路后汇合到同一资源的路径。
@@ -62,6 +63,7 @@ class UtilityConfig:
     Approach 默认搜索 20 步，并使用 0.95 的命中奖励衰减后选择最佳路径，用于表达
     玩家在 energizer 后跨较长地图距离追逐 scared ghost 的行为；该范围明显长于
     Evade，二者分别对应远程追逐和近程避险。
+    当前无效字段必须继续在调用文档中标明，不能据其取值解释实验结果。
     """
 
     randomness_coeff: float = 0.0

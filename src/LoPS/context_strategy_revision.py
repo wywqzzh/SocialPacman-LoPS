@@ -1,19 +1,16 @@
-#!/usr/bin/env python3
-"""按规则修正双人 Social Pacman 动态策略权重数据。
+"""根据事件结果和方向证据修正 Social Pacman context 策略。
 
-本阶段读取 06 生成的 joint-state 权重表，对 p1/p2 分别构造临时单人视角，
-沿用原有人工规则修正策略权重，再把修正结果写回同一份 joint-state 表。
+本模块接收单个玩家的 posterior 临时视图，按固定顺序执行 vague、Energizer、
+Approach 和 scared-time 规则，并返回逐 context 的修正分数与策略。目录遍历、玩家
+字段映射和结果写回由阶段入口负责，本模块不包含历史 GA 数据接口。
 """
 
 from __future__ import annotations
 
-import argparse
 import ast
 import copy
-import os
 from copy import deepcopy
 from dataclasses import dataclass
-from itertools import groupby
 from pathlib import Path
 from typing import Any
 
@@ -47,14 +44,6 @@ SUFFIX = "_Q_norm"
 AGENT_Q_COLUMNS = [f"{agent}{SUFFIX}" for agent in AGENTS]
 DIRECTION_NAMES = ["left", "right", "up", "down"]
 RANDOM_DIAGNOSTIC_COLUMNS = ["predict_dir", "revised_prediction_correct"]
-PLAYER_PREFIXES = ("p1", "p2")
-PLAYER_REVISED_COLUMNS = (
-    "revised_normalized_weight",
-    "revised_prediction_correct",
-    "revised_predict_dir",
-    "revised_is_vague",
-    "strategy",
-)
 VAGUE_REVISE_MIN_ACCURACY = 0.70
 LOW_EVIDENCE_MIN_EFFECTIVE_ACTION_RATIO = 0.5
 SCARED_GHOST_STATUS_MIN = 4
@@ -78,33 +67,6 @@ class ContextData:
     valid_indices: np.ndarray
     nan_indices: np.ndarray
     true_prob: pd.Series
-
-
-def project_root() -> Path:
-    """返回 LoPS 仓库根目录。
-
-    输入语义：无输入，通过脚本位置推导根目录。
-    输出语义：返回用于构造默认数据目录的 Path。
-    关键约束：默认路径只存在于脚本层，不写入正式业务逻辑。
-    """
-
-    return Path(__file__).resolve().parents[1]
-
-
-def list_nested_pickle_files(data_dir: Path) -> list[Path]:
-    """列出嵌套任务目录中的 pickle 文件。
-
-    输入语义：data_dir 是 WeightData 输入根目录，内部应包含 ``comp``、``coop`` 等任务子目录。
-    输出语义：返回按文件名排序的 `.pkl` 路径。
-    关键约束：当前项目正式数据只使用嵌套结构，不再兼容旧扁平目录。
-    """
-
-    if not data_dir.is_dir():
-        raise FileNotFoundError(f"输入目录不存在：{data_dir}")
-    file_paths = sorted(path for path in data_dir.glob("*/*.pkl") if path.is_file())
-    if not file_paths:
-        raise FileNotFoundError(f"输入目录中没有嵌套 pickle 文件：{data_dir}")
-    return file_paths
 
 
 def one_hot_direction(value: str) -> list[int]:
@@ -323,103 +285,6 @@ def recompute_strategy(data: pd.DataFrame, file_name: str, trial_name: str) -> N
         ),
         axis=1,
     )
-
-
-def discover_players(data: pd.DataFrame) -> list[str]:
-    """识别当前 joint-state 表中可进行 07 修正的玩家。
-
-    输入语义：data 是 06 输出的 joint-state DataFrame。
-    输出语义：返回字段完整的玩家前缀列表，例如 ``["p1", "p2"]``。
-    关键约束：单人数据若没有 p2 字段，会自然跳过 p2；若某个玩家字段部分缺失，
-    直接报错，避免生成半修正结果。
-    """
-
-    players: list[str] = []
-    for player in PLAYER_PREFIXES:
-        required_columns = {
-            "DayTrial",
-            "row_id",
-            "ifscared1",
-            "ifscared2",
-            f"{player}_eat_energizer",
-            f"{player}_eat_ghost",
-            f"{player}_action_dir",
-            f"{player}_normalized_weight",
-            f"{player}_prediction_correct",
-            f"{player}_predict_dir",
-            f"{player}_trial_context",
-            f"{player}_is_stay",
-            f"{player}_is_vague",
-        }
-        required_columns.update(f"{player}_{agent}{SUFFIX}" for agent in AGENTS)
-        player_signal_columns = {f"{player}_normalized_weight", f"{player}_trial_context"}
-        if player_signal_columns.isdisjoint(data.columns):
-            continue
-        missing_columns = sorted(required_columns - set(data.columns))
-        if missing_columns:
-            raise ValueError(f"{player} 07 输入字段不完整，缺少：{missing_columns}")
-        players.append(player)
-    if not players:
-        raise ValueError("未找到可修正的玩家字段，至少需要 p1_normalized_weight/p1_trial_context。")
-    return players
-
-
-def prepare_player_view(data: pd.DataFrame, player: str) -> pd.DataFrame:
-    """把 joint-state 表映射成旧规则可处理的单人临时视角。
-
-    输入语义：data 是 06 输出表，player 指定 ``p1`` 或 ``p2``。
-    输出语义：返回包含 ``normalized_weight/action_dir/trial_context`` 等通用字段的副本。
-    关键约束：这里不删除任何 joint 行；死亡或无动作行已经由 06 表中的 action_dir/权重
-    表达。吃 energizer/ghost 事件也从玩家私有列映射过来，队友事件不再触发当前玩家
-    的 07 修正规则。
-    """
-
-    view = data.copy(deep=True)
-    column_mapping = {
-        f"{player}_action_dir": "action_dir",
-        f"{player}_normalized_weight": "normalized_weight",
-        f"{player}_prediction_correct": "prediction_correct",
-        f"{player}_predict_dir": "predict_dir",
-        f"{player}_trial_context": "trial_context",
-        f"{player}_is_stay": "is_stay",
-        f"{player}_is_vague": "is_vague",
-        f"{player}_eat_energizer": "eat_energizer",
-        f"{player}_eat_ghost": "eat_ghost",
-    }
-    for source, target in column_mapping.items():
-        view[target] = copy.deepcopy(view[source])
-    for agent in AGENTS:
-        view[f"{agent}{SUFFIX}"] = copy.deepcopy(view[f"{player}_{agent}{SUFFIX}"])
-    return view
-
-
-def initialize_player_revised_columns(result: pd.DataFrame, player: str) -> None:
-    """在 joint-state 结果表中初始化某个玩家的 07 输出列。
-
-    输入语义：result 是待写回的 joint-state 表；player 是玩家前缀。
-    输出语义：就地创建 ``p1_revised_normalized_weight`` 等列。
-    关键约束：复杂对象列必须使用 object dtype，避免列表权重被 pandas 展开。
-    """
-
-    for column in PLAYER_REVISED_COLUMNS:
-        result[f"{player}_{column}"] = pd.Series([np.nan] * len(result), index=result.index, dtype=object)
-
-
-def write_player_revision(result: pd.DataFrame, player: str, revised_view: pd.DataFrame) -> None:
-    """把单人临时视角的修正结果写回 joint-state 表。
-
-    输入语义：result 是原 joint-state 输出表，revised_view 是经过 process_trial 规则修正后的视角表。
-    输出语义：写入玩家前缀 revised 字段，不覆盖 06 原始拟合字段。
-    关键约束：行数和顺序必须完全一致；若不一致说明规则处理丢行，应立即报错。
-    """
-
-    if len(result) != len(revised_view):
-        raise ValueError(f"{player} 07 修正后行数不一致：input={len(result)}, revised={len(revised_view)}")
-    result[f"{player}_revised_normalized_weight"] = revised_view["revised_normalized_weight"].to_numpy()
-    result[f"{player}_revised_prediction_correct"] = revised_view["revised_prediction_correct"].to_numpy()
-    result[f"{player}_revised_predict_dir"] = revised_view["predict_dir"].to_numpy()
-    result[f"{player}_revised_is_vague"] = revised_view["is_vague"].to_numpy()
-    result[f"{player}_strategy"] = revised_view["strategy"].to_numpy()
 
 
 def extract_context_data(data: pd.DataFrame, prev: int, end: int) -> ContextData | None:
@@ -771,36 +636,6 @@ def revise_energizer_by_outcome(data: pd.DataFrame) -> None:
         )
 
 
-def revise_approach(data: pd.DataFrame, contexts: list[tuple[int, int]]) -> None:
-    """修正未实际吃到 ghost 的 approach 段落。
-
-    输入语义：contexts 是当前被判定为 approach 且排除吃 ghost 后的段落。
-    输出语义：如果其它策略预测表现接近或优于 approach，则改写为其它策略。
-    关键约束：基础规则保留旧逻辑 `accuracyApproach == 0 或 max/approach > 0.8`。
-    这些 contexts 已经排除了真正吃到 ghost 的段落，因此一旦触发修正，approach
-    不再作为候选策略；多个非 approach 策略并列最高时会同时保留为 1。
-    """
-
-    for prev, end in contexts:
-        context = extract_context_data(data, prev, end)
-        if context is None:
-            continue
-        agent_accuracy, _ = score_agent_accuracies(context, list(range(len(AGENTS))))
-        accuracy_approach = agent_accuracy[AGENT_INDEX["approach"]]
-        non_approach_accuracy = list(agent_accuracy)
-        non_approach_accuracy[AGENT_INDEX["approach"]] = 0
-        revise_weight, max_non_approach_accuracy = tied_best_accuracy_weight(non_approach_accuracy)
-        # 若其它策略也完全没有有效预测能力，就不能仅因为 approach 为 0 而强行改写。
-        if max_non_approach_accuracy <= 0:
-            continue
-        if accuracy_approach == 0 or max_non_approach_accuracy / accuracy_approach > 0.8:
-            # 修正触发条件仍然沿用旧逻辑：其它策略接近或优于 approach 时才修正。
-            # 由于这些 contexts 已经排除了真正吃到 ghost 的段落，所以修正候选里
-            # approach 必须保持为 0；若多个非 approach 策略并列最高，则同时保留它们，
-            # 再交给统一优先级决定最终显示标签。
-            apply_revised_weight(data, prev, end, context, revise_weight, update_predict_dir=True)
-
-
 def set_weight(data: pd.DataFrame, contexts: list[tuple[int, int]], revise_weight: list[int]) -> None:
     """无额外阈值地把一组段落写成指定权重。
 
@@ -814,57 +649,6 @@ def set_weight(data: pd.DataFrame, contexts: list[tuple[int, int]], revise_weigh
         if context is None:
             continue
         apply_revised_weight(data, prev, end, context, revise_weight, update_predict_dir=True)
-
-
-def revise_wrong_energizer(data: pd.DataFrame, energizer_contexts: list[tuple[int, int]]) -> None:
-    """修正被误标为 energizer 的 local 段落。
-
-    输入语义：energizer_contexts 是连续 energizer 标签区间，区间右端是闭区间。
-    输出语义：满足后继 local 且准确率不过度下降的段落被改为 local。
-    关键约束：该旧规则不写回 predict_dir，只更新 revised_prediction_correct 和 strategy。
-    """
-
-    for context_range in energizer_contexts:
-        prev = context_range[0]
-        end = context_range[1] + 1
-        context = extract_context_data(data, prev, end)
-        if context is None:
-            continue
-
-        temp_index = context_range[1] + 1
-        if temp_index > data["row_id"].iloc[-1]:
-            continue
-        if data["strategy"].loc[temp_index] != STRATEGY_NUMBER["approach"] and data["strategy"].loc[temp_index] == STRATEGY_NUMBER["local"]:
-            original_weight = deepcopy(data["revised_normalized_weight"].loc[prev])
-            revise_weight = [0] * len(AGENTS)
-            revise_weight[AGENT_INDEX["local"]] = 1
-
-            # 旧脚本在判断失败前已经把整段临时写成 local；若准确率下降过多，
-            # 再用连续 energizer 段第一行的原始权重回滚整段。这个“整段回滚”
-            # 会传播第一行权重，属于旧输出的一部分，需要显式保留。
-            labels = list(data.loc[prev : end - 1].index)
-            assign_object_values(data, labels, "revised_normalized_weight", revise_weight)
-
-            phase_is_correct, _, rate = calculate_prediction_result(np.array(revise_weight), context)
-            _, _, original_rate = calculate_prediction_result(np.array(original_weight), context)
-            # 当前双人数据中可能出现原权重在该段完全预测不到真实方向的情况。
-            # 此时不能直接做 rate/original_rate。并且 local 若只是和原策略一样差，
-            # 或只依赖无信息 Q 得到伪准确率，就不应覆盖原 energizer 判断。
-            # 这里要求 local 修正必须提供正的、且高于原策略的有效准确率；否则保留原权重。
-            if (
-                rate <= 0
-                or (original_rate == 0 and rate == 0)
-                or (original_rate > 0 and rate <= original_rate)
-                or (original_rate > 0 and rate / original_rate < 0.8)
-            ):
-                assign_object_values(data, labels, "revised_normalized_weight", original_weight)
-                continue
-
-            data.loc[labels, "strategy"] = [STRATEGY_NUMBER["local"]] * len(labels)
-            data.loc[list(context.valid_indices), "revised_prediction_correct"] = np.array(phase_is_correct, dtype=int)
-            if len(context.nan_indices) > 0:
-                data.loc[list(context.nan_indices), "revised_prediction_correct"] = [np.nan] * len(context.nan_indices)
-            data.loc[labels, "is_vague"] = [False] * len(labels)
 
 
 def unique_sorted_contexts(values: Any) -> list[tuple[int, int]]:
@@ -906,15 +690,13 @@ def process_trial(
     input_path: Path,
     trial_name: str,
     scared_time: int,
-    *,
-    use_energizer_outcome_rule: bool = False,
 ) -> pd.DataFrame | None:
     """处理单个 trial 的全部手动规则。
 
     输入语义：data 是同一 `DayTrial` 的切片，保留原始标签；trial_name 是 trial 名。
     输出语义：返回修正后的 two-ghost trial 数据。
-    关键约束：默认保持旧07规则；07c显式启用 ``use_energizer_outcome_rule`` 时，
-    用准确率阈值和事件结果确认 Energizer，并停用旧的强制覆盖与后继 Local 回滚。
+    关键约束：Energizer 必须同时满足准确率和实际事件结果；Approach 的未吃鬼二次
+    否定规则不适用于双人任务，因此当前不执行。
     """
 
     recompute_strategy(data, str(input_path), trial_name)
@@ -925,31 +707,15 @@ def process_trial(
     revise_vague(data, vague_contexts)
     recompute_strategy(data, str(input_path), trial_name)
 
-    # 暂时停用所有 Approach 二次修正。06c/旧 06 已经根据完整 Q 证据得到 Approach；
+    # 不执行“当前玩家没有亲自吃到 ghost 就否定 Approach”的二次修正。策略后验已经
+    # 根据完整 Q 证据得到 Approach；
     # 双人任务中即使当前玩家没有亲自吃到 ghost，也可能是队友抢先吃掉，不能再把
-    # “未亲自吃到”当作否定追鬼意图的充分证据。保留原实现函数和以下调用草稿，
-    # 后续确定新的多人判据后可恢复，但当前流程不执行筛选、改权重或 strategy 重算。
-    #
-    # context_approach = np.where(data["strategy"] == STRATEGY_NUMBER["approach"])[0]
-    # context_approach = list(set(list(data["trial_context"].iloc[context_approach])))
-    # context_approach = filter_contexts_to_trial(data, context_approach)
-    # eat_ghost = np.where(data["eat_ghost"] == True)[0] - 1 + data["row_id"].iloc[0]
-    # for prev, end in deepcopy(context_approach):
-    #     is_eat_ghost = [1 if prev <= eat_index < end else 0 for eat_index in eat_ghost]
-    #     if 1 in is_eat_ghost:
-    #         context_approach.remove((prev, end))
-    # revise_approach(data, context_approach)
-    # recompute_strategy(data, str(input_path), trial_name)
+    # “未亲自吃到”不能作为否定追鬼意图的充分证据。
 
     eat_energizer = np.where(data["eat_energizer"] == True)[0] - 1 + data["row_id"].iloc[0]
     eat_energizer_context = list(np.array(data["trial_context"].loc[eat_energizer]))
     eat_energizer_context = filter_contexts_to_trial(data, eat_energizer_context)
-    if use_energizer_outcome_rule:
-        revise_energizer_by_outcome(data)
-    else:
-        revise_weight = [0] * len(AGENTS)
-        revise_weight[AGENT_INDEX["energizer"]] = 1
-        revise_function(data, eat_energizer_context, revise_weight, AGENT_INDEX["energizer"])
+    revise_energizer_by_outcome(data)
     recompute_strategy(data, str(input_path), trial_name)
 
     eat_energizer_next = [end for _, end in eat_energizer_context]
@@ -969,7 +735,7 @@ def process_trial(
     revise_weight = [0] * len(AGENTS)
     revise_weight[AGENT_INDEX["approach"]] = 1
     # Energizer 后第一段允许 Approach 达到最佳单策略准确率的 75% 即触发，并包含
-    # 恰好 0.75 的边界。其它 revise_function 调用仍使用严格大于 0.8 的旧阈值。
+    # 恰好 0.75 的边界。其它 revise_function 调用仍使用严格大于 0.8 的阈值。
     revise_function(
         data,
         eat_energizer_next_context,
@@ -1005,13 +771,6 @@ def process_trial(
 
     recompute_strategy(data, str(input_path), trial_name)
 
-    if not use_energizer_outcome_rule:
-        energizer_index = np.where(data["strategy"] == STRATEGY_NUMBER["energizer"])[0] + data["row_id"].iloc[0]
-        groups = groupby(enumerate(energizer_index), lambda index_value: index_value[0] - index_value[1])
-        energizer_context = [(group_items[0][1], group_items[-1][1]) for _, group_items in ((key, list(group)) for key, group in groups)]
-        revise_wrong_energizer(data, energizer_context)
-    # 旧脚本在该阶段后直接收集 trial 数据，没有再对收集结果重算 strategy。
-    # 失败分支保持原 strategy，成功分支由 revise_wrong_energizer 直接写成 local。
     return data
 
 
@@ -1020,15 +779,13 @@ def revise_player_view(
     input_path: Path,
     player: str,
     scared_time: int,
-    *,
-    use_energizer_outcome_rule: bool = False,
 ) -> pd.DataFrame:
     """对一个玩家的临时单人视角执行完整 07 修正。
 
-    输入语义：player_view 已经由 prepare_player_view 映射为旧规则通用字段。
+    输入语义：player_view 已经由阶段入口映射为规则模块需要的通用字段。
     输出语义：返回与原 player_view 行顺序一致的修正后表。
     关键约束：process_trial 内部使用原始行标签和 row_id 定位 context；因此合并所有 trial
-    后必须按原 index 排序。Energizer 结果规则默认关闭，仅由07c显式启用。
+    后必须按原 index 排序。Energizer 始终使用准确率与实际结果联合判定。
     """
 
     required_columns = {"DayTrial", "row_id", "normalized_weight", "prediction_correct", "action_dir"}
@@ -1047,7 +804,6 @@ def revise_player_view(
             input_path,
             trial_name,
             scared_time,
-            use_energizer_outcome_rule=use_energizer_outcome_rule,
         )
         if processed_trial is not None:
             all_trial_record.append(copy.deepcopy(processed_trial))
@@ -1057,124 +813,3 @@ def revise_player_view(
     if len(corrected_data) != len(player_view):
         raise ValueError(f"{input_path.name} {player} 修正后丢行：input={len(player_view)}, output={len(corrected_data)}")
     return corrected_data
-
-
-def process_one_file(input_path: Path, output_path: Path, scared_time: int = 34) -> dict[str, Any]:
-    """处理一个 06 WeightData 文件并保存 07 CorrectedWeightData。
-
-    输入语义：input_path 指向嵌套目录中的 06 joint-state pickle，output_path 是对应输出路径。
-    输出语义：写出同结构 corrected weight pickle，并返回摘要。
-    关键约束：p1/p2 分别修正，但输出仍是一份 joint-state 表；不覆盖 06 原始字段。
-    """
-
-    df = pd.read_pickle(input_path)
-    result = df.copy(deep=True).reset_index(drop=True)
-    players = discover_players(result)
-    for player in players:
-        initialize_player_revised_columns(result, player)
-        player_view = prepare_player_view(result, player)
-        revised_view = revise_player_view(player_view, input_path, player, scared_time)
-        write_player_revision(result, player, revised_view)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    result.to_pickle(output_path)
-
-    return {
-        "input_file": str(input_path),
-        "output_file": str(output_path),
-        "input_rows": int(len(df)),
-        "output_rows": int(len(result)),
-        "players": players,
-    }
-
-
-def process_revise_human_weight(
-    input_dir: Path,
-    output_dir: Path,
-    *,
-    processes: int,
-    scared_time: int = 34,
-) -> list[dict[str, Any]]:
-    """批量执行人类权重修正流程。
-
-    输入语义：input_dir/output_dir 都是嵌套任务目录根目录，processes 控制并行度。
-    输出语义：返回所有文件的处理摘要。
-    关键约束：规则无跨文件依赖，因此文件级并行不会改变结果。
-    """
-
-    input_paths = list_nested_pickle_files(input_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    tasks = [
-        (
-            input_path,
-            output_dir / input_path.relative_to(input_dir),
-            scared_time,
-        )
-        for input_path in input_paths
-    ]
-
-    if processes <= 1:
-        return [_process_one_file_task(task) for task in tasks]
-
-    process_count = min(processes, len(tasks))
-    import multiprocessing
-
-    with multiprocessing.Pool(processes=process_count) as pool:
-        return pool.map(_process_one_file_task, tasks)
-
-
-def _process_one_file_task(task: tuple[Path, Path, int]) -> dict[str, Any]:
-    """执行一个文件级 07 修正任务。
-
-    输入语义：task 包含输入路径、输出路径和 scared_time。
-    输出语义：返回 process_one_file 的摘要字典。
-    关键约束：保持顶层函数，便于 multiprocessing 序列化。
-    """
-
-    input_path, output_path, scared_time = task
-    return process_one_file(input_path, output_path, scared_time=scared_time)
-
-
-def parse_args() -> argparse.Namespace:
-    """解析命令行参数。
-
-    输入语义：允许覆盖输入、输出、并行度和 scared_time。
-    输出语义：返回可驱动批处理的参数对象。
-    关键约束：默认路径全部位于 LoPS 仓库内，不依赖旧项目。
-    """
-
-    data_root = project_root() / "data"
-    parser = argparse.ArgumentParser(description="按旧规则修正人类策略权重数据。")
-    parser.add_argument("--input-dir", type=Path, default=data_root / "06_weight_data")
-    parser.add_argument("--output-dir", type=Path, default=data_root / "07_corrected_weight_data")
-    parser.add_argument("--processes", type=int, default=min(8, os.cpu_count() or 1))
-    parser.add_argument(
-        "--scared-time",
-        type=int,
-        default=34,
-        help="tile 级 scared 合并窗口；当前数据由 420/440 帧基础 scared 时间换算为 34。",
-    )
-    return parser.parse_args()
-
-
-def main() -> None:
-    """命令行入口：运行人类权重修正并打印摘要。"""
-
-    args = parse_args()
-    summaries = process_revise_human_weight(
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
-        processes=args.processes,
-        scared_time=args.scared_time,
-    )
-    print(
-        "revise_human_weight 完成 "
-        f"input_files={len(summaries)} "
-        f"input_rows={sum(item['input_rows'] for item in summaries)} "
-        f"output_rows={sum(item['output_rows'] for item in summaries)} "
-        f"output_dir={args.output_dir}"
-    )
-
-
-if __name__ == "__main__":
-    main()

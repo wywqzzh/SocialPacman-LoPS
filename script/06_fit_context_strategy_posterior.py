@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""运行 06c Context 潜在策略后验拟合。"""
+"""运行 06 Context 潜在策略后验拟合。"""
 
 from __future__ import annotations
 
@@ -23,17 +23,17 @@ from LoPS.context_strategy_posterior import (  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
-    """解析 06c 命令行参数。
+    """解析 06 命令行参数。
 
     输入语义：允许覆盖输入输出、context 参数、beta 搜索、CV 和文件级并行。
     输出语义：返回可构造 ContextStrategyPosteriorConfig 的 argparse Namespace。
-    关键约束：默认目录与 06b 分离；单文件调试不会误处理整个输入目录。
+    关键约束：单文件调试不会误处理整个输入目录。
     """
 
     data_root = PROJECT_ROOT / "data"
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-dir", type=Path, default=data_root / "05_cluster_global_utility_data")
-    parser.add_argument("--output-dir", type=Path, default=data_root / "06c_context_strategy_posterior_data")
+    parser.add_argument("--input-dir", type=Path, default=data_root / "05_utility_data")
+    parser.add_argument("--output-dir", type=Path, default=data_root / "06_strategy_posterior_data")
     parser.add_argument(
         "--single-file",
         type=Path,
@@ -46,7 +46,10 @@ def parse_args() -> argparse.Namespace:
         "--bean-event-suppression-window",
         type=int,
         default=3,
-        help="强事件前后取消普通豆起止边界的 tile 窗口。",
+        help=(
+            "普通豆弱边界抑制窗口：trial/stay 使用方向性抑制，死亡、本人 Energizer "
+            "和公共吃 Ghost 使用前后对称抑制。"
+        ),
     )
     parser.add_argument(
         "--ghost-stay-suppression-window",
@@ -99,7 +102,7 @@ def resolve_single_file(input_dir: Path, value: Path) -> Path:
 
 
 def build_config(args: argparse.Namespace) -> ContextStrategyPosteriorConfig:
-    """把命令行参数转换成 06c 正式配置。
+    """把命令行参数转换成 06 正式配置。
 
     输入语义：args 来自 parse_args。
     输出语义：返回不可变 ContextStrategyPosteriorConfig。
@@ -123,7 +126,7 @@ def build_config(args: argparse.Namespace) -> ContextStrategyPosteriorConfig:
 
 
 def main() -> None:
-    """命令行入口：运行单文件或嵌套目录 06c 并打印 JSON 摘要。"""
+    """命令行入口：运行单文件或嵌套目录 06 并打印 JSON 摘要。"""
 
     args = parse_args()
     config = build_config(args)

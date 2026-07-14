@@ -26,9 +26,10 @@ class PacmanFrameDataTest(unittest.TestCase):
                     "2-1-031222-401-03-Dec-2022",
                     "1-2-031222-401-03-Dec-2022",
                 ],
-                "Map": ["#" * (29 * 36)] * 4,
-                "pacMan_1": [10, 1, 2, 1],
-                "pacMan_2": [18, 18, 18, 19],
+                "Map": ["#" * (28 * 36)] * 4,
+                "p1_pacMan_1": [10, 1, 2, 1],
+                "p1_pacMan_2": [18, 18, 18, 19],
+                "p1_mode": [1, 1, 1, 1],
                 "ghost1_1": [5, 5, 5, 5],
                 "ghost1_2": [6, 6, 6, 6],
                 "ghost1_3": [1, 1, 1, 1],
@@ -41,8 +42,8 @@ class PacmanFrameDataTest(unittest.TestCase):
                 "ghost4_1": [np.inf, np.inf, np.inf, np.inf],
                 "ghost4_2": [np.inf, np.inf, np.inf, np.inf],
                 "ghost4_3": [np.inf, np.inf, np.inf, np.inf],
-                "JoyStick": ["left", "right", "up", "down"],
-                "pDir": ["left", "right", "up", "down"],
+                "p1_JoyStick": ["left", "right", "up", "down"],
+                "p1_pDir": ["left", "right", "up", "down"],
             }
         )
 
@@ -53,10 +54,10 @@ class PacmanFrameDataTest(unittest.TestCase):
         self.assertEqual(
             frame_data[["DayTrial", "Step"]].apply(tuple, axis=1).tolist(),
             [
-                ("1-2-031222-401-03-Dec-2022", 0),
-                ("1-2-031222-401-03-Dec-2022", 1),
-                ("2-1-031222-401-03-Dec-2022", 0),
-                ("10-1-031222-401-03-Dec-2022", 0),
+                ("01-02-031222-401-03-Dec-2022", 0),
+                ("01-02-031222-401-03-Dec-2022", 1),
+                ("02-01-031222-401-03-Dec-2022", 0),
+                ("10-01-031222-401-03-Dec-2022", 0),
             ],
         )
 
@@ -72,9 +73,10 @@ class PacmanFrameDataTest(unittest.TestCase):
                     "2-1-031222-401-03-Dec-2022",
                     "2-1-031222-401-03-Dec-2022",
                 ],
-                "Map": ["#" * (29 * 36)] * 4,
-                "pacMan_1": [10, 10, 12, 12],
-                "pacMan_2": [18, 19, 18, 19],
+                "Map": ["#" * (28 * 36)] * 4,
+                "p1_pacMan_1": [10, 10, 12, 12],
+                "p1_pacMan_2": [18, 19, 18, 19],
+                "p1_mode": [1, 1, 1, 1],
                 "ghost1_1": [5, 5, 5, 5],
                 "ghost1_2": [6, 6, 6, 6],
                 "ghost1_3": [1, 1, 1, 1],
@@ -89,14 +91,14 @@ class PacmanFrameDataTest(unittest.TestCase):
                 "ghost4_1": [np.inf, np.inf, 22, 22],
                 "ghost4_2": [np.inf, np.inf, 18, 18],
                 "ghost4_3": [np.inf, np.inf, 4, 4],
-                "JoyStick": ["left", "right", "up", "down"],
-                "pDir": ["left", "right", "up", "down"],
+                "p1_JoyStick": ["left", "right", "up", "down"],
+                "p1_pDir": ["left", "right", "up", "down"],
             }
         )
 
         frame_data = convert_raw_subject_data_to_frame_data(raw_data)
 
-        self.assertEqual(frame_data["DayTrial"].unique().tolist(), ["1-1-031222-401-03-Dec-2022"])
+        self.assertEqual(frame_data["DayTrial"].unique().tolist(), ["01-01-031222-401-03-Dec-2022"])
         self.assertEqual(frame_data["Step"].tolist(), [0, 1])
         self.assertNotIn("Unnamed: 0", frame_data.columns)
         self.assertEqual(frame_data["frame_id"].tolist(), [0, 1])

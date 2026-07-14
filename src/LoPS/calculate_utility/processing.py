@@ -890,8 +890,8 @@ def global_cluster_candidate_columns() -> tuple[str, str, str]:
 
     输入语义：无。
     输出语义：返回 raw 候选矩阵、归一化候选矩阵和候选 meta 三个无玩家前缀字段名。
-    关键约束：这些字段只是候选池，不直接进入 06 的 GA 拟合；06b 会先选择 best
-    cluster，再覆盖正式 ``global_Q/global_Q_norm`` 字段。
+    关键约束：这些字段只是候选池；正式 06 会先在每个 context 选择 best cluster，
+    再把该候选作为唯一 Global raw Q 参与后验拟合。
     """
 
     return ("global_utility_k", "global_utility_k_norm", "global_utility_k_meta")
@@ -939,7 +939,8 @@ def prefixed_global_cluster_candidate_columns(player: str) -> list[str]:
 
     输入语义：player 是 ``p1`` 或 ``p2``。
     输出语义：返回带玩家前缀的候选字段名列表。
-    关键约束：候选字段与普通 Q 字段一起保存在 05 输出，供 06b context 预处理读取。
+    关键约束：候选字段与普通 Q 字段一起保存在 05 输出，供正式 06 的 context 目标
+    选择预处理读取。
     """
 
     return [f"{player}_{column}" for column in global_cluster_candidate_columns()]
@@ -966,8 +967,8 @@ def append_global_cluster_candidate_columns(
 
     输入语义：data 是已经完成普通 Q 和 Q_norm 计算的单玩家视角表。
     输出语义：返回追加 ``global_utility_k*`` 三个字段的新 DataFrame。
-    关键约束：本函数不修改 ``global_Q``；旧 global 仍保留作兼容检查，06b 会在
-    context 级选择 best cluster 后覆盖正式 global 字段。
+    关键约束：本函数不修改 ``global_Q``；正式 06 会在独立临时视图中按 context
+    选择 best cluster，不覆盖 05 原始字段。
     """
 
     result = data.copy(deep=True)
@@ -996,7 +997,7 @@ def append_energizer_target_candidate_columns(
     输入语义：data 是已经完成普通 Q 和 Global 候选计算的单玩家视角表。
     输出语义：返回追加 ``energizer_utility_k*`` 三个字段的新 DataFrame。
     关键约束：不在05内根据动作选择目标，也不把是否最终吃到 energizer 混入 utility；
-    context 级目标选择和事件结果修正分别属于06c与07c。
+    context 级目标选择和事件结果修正分别属于正式 06 与 07。
     """
 
     result = data.copy(deep=True)
@@ -1026,8 +1027,8 @@ def append_approach_target_candidate_columns(
     输入语义：data 已完成普通 Q、Global 和 Energizer 候选计算；config 提供当前正式
     Approach 搜索深度与距离衰减。
     输出语义：返回追加 ``approach_utility_k*`` 三个字段的新 DataFrame。
-    关键约束：不覆盖旧 ``approach_Q``，使05输出仍可用于回归诊断；06c会在 context
-    级选定目标后，把候选写入自己的正式 Approach 拟合视图。
+    关键约束：不覆盖旧 ``approach_Q``，使05输出仍可用于回归诊断；正式 06 会在
+    context 级选定目标后，把候选写入自己的临时 Approach 拟合视图。
     """
 
     result = data.copy(deep=True)

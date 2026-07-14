@@ -21,7 +21,11 @@ from LoPS.generate_grammar.token import (
     token_length,
     tokens_share_base_token,
 )
-from tests.generate_grammar_fixtures import STATE_GRAPH_DIR, STRATEGY_SEQUENCE_DIR
+from tests.generate_grammar_fixtures import (
+    HAS_REPRESENTATIVE_GRAMMAR_INPUTS,
+    STATE_GRAPH_DIR,
+    STRATEGY_SEQUENCE_DIR,
+)
 
 
 class GenerateGrammarFoundationTest(unittest.TestCase):
@@ -54,6 +58,10 @@ class GenerateGrammarFoundationTest(unittest.TestCase):
             config.validate()
             self.assertTrue(config.output_dir.exists())
 
+    @unittest.skipUnless(
+        HAS_REPRESENTATIVE_GRAMMAR_INPUTS,
+        "保留的 08–12 集成测试数据尚未生成",
+    )
     def test_load_strategy_state_data(self) -> None:
         """验证策略序列 pickle 会被读取为正式数据记录对象。"""
         # 使用代表性真实文件，检查序列、状态特征和参与者文件名等核心字段的数据形态。
@@ -68,6 +76,10 @@ class GenerateGrammarFoundationTest(unittest.TestCase):
         self.assertTrue(record.participant_file_names[0].endswith(".pkl"))
         self.assertFalse(record.participant_ids[0].endswith(".pkl"))
 
+    @unittest.skipUnless(
+        HAS_REPRESENTATIVE_GRAMMAR_INPUTS,
+        "保留的 08–12 集成测试数据尚未生成",
+    )
     def test_load_state_dependency_graph(self) -> None:
         """验证状态依赖图 pickle 会生成按状态索引组织的条件依赖列表。"""
         # StateGraph 的 G 矩阵会被转换成每个状态的条件依赖列表。

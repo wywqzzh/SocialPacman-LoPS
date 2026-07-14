@@ -3,10 +3,10 @@
 
 整体流程分成两个清晰层次：
 
-1. ``04_tile_data`` 保存“联合位置变化候选帧”。本阶段读取
+1. ``04_tile_data`` 保存“联合状态变化候选帧”。本阶段读取
    ``03_preprocessed_frame_data/{task}/{session}.pkl``，在每个 trial 内比较
-   两个 Pacman（单人数据只有 p1）和两个 ghost 的联合位置状态；如果当前帧
-   与上一帧的联合位置完全相同，则删除当前帧，否则保留。
+   两个 Pacman（单人数据只有 p1）的坐标与 mode，以及两个 ghost 的坐标；如果当前帧
+   与上一帧的联合状态完全相同，则删除当前帧，否则保留。
 2. ``04_corrected_tile_data`` 在候选帧基础上处理“异步位置切换区间”。真实数据
    中不同对象的 tile 切换可能相差几帧，因此候选帧会在一个短区间内连续出现。
    corrected 阶段以 13 帧为区间，在不破坏“上一条保留行 -> 下一条候选行”的
@@ -365,7 +365,7 @@ def compress_async_transition_rows(
 ) -> pd.DataFrame:
     """压缩一个 trial 内由异步位置切换造成的短区间候选帧。
 
-    输入语义：trial_tile_rows 是当前 04 tile data 中某个 trial 的联合位置变化候选帧。
+    输入语义：trial_tile_rows 是当前 04 tile data 中某个 trial 的联合状态变化候选帧。
     输出语义：返回删除冗余中间候选帧后的 trial 数据，尚未追加动作字段。
     关键约束：
     - 第一行永远保留，保证每个 trial 有明确起点。
@@ -451,10 +451,11 @@ def compress_async_transition_rows(
 
 
 def sample_tile_rows_from_frame_data(subject_frame_data: pd.DataFrame) -> pd.DataFrame:
-    """按联合位置状态变化从单个 session 的 frame data 中抽取 tile 行。
+    """按联合位置与 Pacman mode 状态变化抽取 tile 行。
 
     输入语义：subject_frame_data 是 03 阶段的标准逐帧表。
-    输出语义：返回抽帧后的 tile DataFrame，第一帧总是保留，后续仅保留联合位置变化帧。
+    输出语义：返回抽帧后的 tile DataFrame，第一帧总是保留；后续只要任一 Pacman
+    坐标/mode 或 Ghost 坐标变化就保留。
     关键约束：比较必须在每个 ``DayTrial`` 内独立进行，不能跨 trial 合并状态。
     """
 

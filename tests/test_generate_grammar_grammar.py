@@ -21,7 +21,11 @@ from LoPS.generate_grammar.grammar import (
     SkipGramResult,
     choose_candidate_chunks,
 )
-from tests.generate_grammar_fixtures import STATE_GRAPH_DIR, STRATEGY_SEQUENCE_DIR
+from tests.generate_grammar_fixtures import (
+    HAS_REPRESENTATIVE_GRAMMAR_INPUTS,
+    STATE_GRAPH_DIR,
+    STRATEGY_SEQUENCE_DIR,
+)
 
 
 class GenerateGrammarCoreTest(unittest.TestCase):
@@ -94,6 +98,10 @@ class GenerateGrammarCoreTest(unittest.TestCase):
         self.assertTrue(skip_gram.found)
         self.assertGreater(skip_gram.count, 0)
 
+    @unittest.skipUnless(
+        HAS_REPRESENTATIVE_GRAMMAR_INPUTS,
+        "保留的 08–12 集成测试数据尚未生成",
+    )
     def test_learn_returns_result_for_representative_real_file(self) -> None:
         """验证核心学习流程能处理代表性真实文件并返回非空结果。"""
         # 代表性真实文件 smoke test：确保核心 learn 能处理迁移数据并返回非空结果。

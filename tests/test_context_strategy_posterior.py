@@ -1,4 +1,4 @@
-"""验证 06c context 策略后验的核心统计语义。"""
+"""验证 06 context 策略后验的核心统计语义。"""
 
 from __future__ import annotations
 
@@ -24,7 +24,8 @@ from LoPS.context_strategy_posterior import (
     normalize_legal_q,
     posterior_from_log_likelihood,
 )
-from LoPS.dynamic_strategy_event_context import (
+from LoPS.context_segmentation import (
+    ContextSegmentationConfig,
     apply_best_global_candidates,
     build_event_context_segments,
     hard_boundary_points,
@@ -32,11 +33,10 @@ from LoPS.dynamic_strategy_event_context import (
     suppress_stay_ranges_near_ghost,
     soft_teammate_event_points,
 )
-from LoPS.dynamic_strategy_fitting import DynamicStrategyFittingConfig
 
 
 class ContextStrategyPosteriorTests(unittest.TestCase):
-    """覆盖 06c 归一化、概率模型、Global 选择和 beta 模型选择。"""
+    """覆盖 06 归一化、概率模型、Global 选择和 beta 模型选择。"""
 
     def test_normalize_legal_q_ignores_walls_and_maps_to_unit_interval(self) -> None:
         """验证合法方向 Min-Max 不让墙方向参与最大值和最小值。"""
@@ -50,7 +50,7 @@ class ContextStrategyPosteriorTests(unittest.TestCase):
 
         输入语义：构造三个持续向右动作；近处 Ghost1 候选预测左，远处 Ghost2 候选
         预测右，并让两只 ghost 的位置逐行变化但身份保持稳定。
-        输出语义：06c 选择 Ghost2，并把它的 Q 写入正式 Approach 拟合视图。
+        输出语义：06 选择 Ghost2，并把它的 Q 写入正式 Approach 拟合视图。
         关键约束：跨行匹配必须使用 target_id，不能使用动态位置或候选列表下标。
         """
 
@@ -181,7 +181,7 @@ class ContextStrategyPosteriorTests(unittest.TestCase):
         contexts, is_stay = build_event_context_segments(
             data,
             "p1",
-            DynamicStrategyFittingConfig(stay_length=4),
+            ContextSegmentationConfig(stay_length=4),
         )
 
         self.assertEqual(contexts, [(0, 6)])
@@ -217,7 +217,7 @@ class ContextStrategyPosteriorTests(unittest.TestCase):
                 }
             )
 
-        config = DynamicStrategyFittingConfig(stay_length=4)
+        config = ContextSegmentationConfig(stay_length=4)
 
         near_start = make_trial()
         near_start.loc[1, "p2_eat_energizer"] = True
@@ -273,7 +273,7 @@ class ContextStrategyPosteriorTests(unittest.TestCase):
         contexts, is_stay = build_event_context_segments(
             data,
             "p1",
-            DynamicStrategyFittingConfig(stay_length=4),
+            ContextSegmentationConfig(stay_length=4),
         )
 
         self.assertEqual(contexts, [(0, row_count)])
@@ -456,7 +456,7 @@ class ContextStrategyPosteriorTests(unittest.TestCase):
         self.assertAlmostEqual(actual, expected)
 
     def test_best_global_selection_matches_06b_probability_accuracy(self) -> None:
-        """验证 06c 复用的 06b 规则会选择真实动作解释率更高的 cluster。"""
+        """验证 06 复用的 06b 规则会选择真实动作解释率更高的 cluster。"""
 
         meta = [
             {
@@ -496,7 +496,7 @@ class ContextStrategyPosteriorTests(unittest.TestCase):
         np.testing.assert_array_equal(selected.at[1, "global_Q"][:2], [0.0, 2.0])
 
     def test_best_energizer_selection_tracks_target_position_across_rows(self) -> None:
-        """验证06c按目标坐标选择并跨行匹配最佳 Energizer。
+        """验证06按目标坐标选择并跨行匹配最佳 Energizer。
 
         输入语义：两个目标在候选列表中的顺序逐行交换；真实动作始终向右，第一个目标
         始终预测向右，第二个目标始终预测向左。

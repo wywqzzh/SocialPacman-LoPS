@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """用 07 阶段修正策略结果数据绘制简易 Pacman 游戏视频。
 
-本脚本直接读取 ``data/07_corrected_weight_data/{task}/{session}.pkl``，选择其中
+本脚本直接读取 ``data/07_revised_strategy_data/{task}/{session}.pkl``，选择其中
 一个 ``DayTrial`` 作为一个 game，把每条 tile 行渲染成一帧视频。地图背景来自
 ``data/constant_data/map_constants.pkl`` 的可走点集合：黑色表示墙，白色表示
 可以走的位置；每帧额外绘制当前剩余的豆子、energizer、两个 Pacman、两个 ghost，
 并在地图上方左右分开显示两个玩家当前拟合出的单个策略。
 
-这个脚本是检查 07 修正策略结果和行为轨迹的轻量可视化工具，不依赖旧的 render table、
-grammar 或逐帧渲染链路。
+这个脚本是检查 07 修正策略结果和行为轨迹的轻量可视化工具，不依赖 render table、
+grammar 或逐 frame 渲染链路。
 """
 
 from __future__ import annotations
@@ -31,9 +31,58 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from LoPS.pacman_video.frame_renderer import DIR_DOWN, direction_enum, quadratic_path
+DIR_UP = 0
+DIR_LEFT = 1
+DIR_DOWN = 2
+DIR_RIGHT = 3
 
-DEFAULT_TILE_ROOT = PROJECT_ROOT / "data/07_corrected_weight_data"
+
+def direction_enum(value: Any) -> int:
+    """把英文方向名称转换为 tile sprite 使用的稳定方向编号。
+
+    输入语义：value 通常是 ``up/left/down/right`` 字符串，也可能是缺失值。
+    输出语义：返回对应的整数编号；无法识别时返回 -1。
+    关键约束：编号只服务于角色朝向绘制，不参与行为数据中的动作推断。
+    """
+
+    if not isinstance(value, str):
+        return -1
+    return {
+        "up": DIR_UP,
+        "left": DIR_LEFT,
+        "down": DIR_DOWN,
+        "right": DIR_RIGHT,
+    }.get(value.strip().lower(), -1)
+
+
+def quadratic_path(
+    p0x: float,
+    p0y: float,
+    p1x: float,
+    p1y: float,
+    p2x: float,
+    p2y: float,
+    steps: int = 8,
+) -> list[tuple[float, float]]:
+    """生成角色局部曲线使用的二次贝塞尔采样点。
+
+    输入语义：三组坐标分别是起点、控制点和终点，steps 控制采样密度。
+    输出语义：返回包含首尾点的二维坐标列表。
+    关键约束：steps 必须为正数；该函数只构造几何路径，不修改画布或数据状态。
+    """
+
+    if steps <= 0:
+        raise ValueError(f"steps 必须为正数，实际为 {steps}")
+    points: list[tuple[float, float]] = []
+    for index in range(steps + 1):
+        t = index / steps
+        x = (1 - t) ** 2 * p0x + 2 * (1 - t) * t * p1x + t**2 * p2x
+        y = (1 - t) ** 2 * p0y + 2 * (1 - t) * t * p1y + t**2 * p2y
+        points.append((x, y))
+    return points
+
+
+DEFAULT_TILE_ROOT = PROJECT_ROOT / "data/07_revised_strategy_data"
 DEFAULT_MAP_CONSTANTS = PROJECT_ROOT / "data/constant_data/map_constants.pkl"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/pacman_video/tile_video"
 DEFAULT_FRAME_OUTPUT_DIR = PROJECT_ROOT / "data/pacman_video/tile_frame_images"
@@ -202,7 +251,7 @@ def bool_from_row_value(value: Any) -> bool:
 
 
 def strategy_name_from_saved_value(value: Any) -> str | None:
-    """把 07/07c 写回的策略字段转换成视频显示使用的策略名。
+    """把正式 07 或兼容输入中的策略字段转换成视频显示使用的策略名。
 
     输入语义：value 通常来自 ``p1_strategy`` 或 ``p2_strategy``，可以是旧编号、
     numpy 数值、字符串策略名或空值。
@@ -234,16 +283,16 @@ def strategy_name_from_saved_value(value: Any) -> str | None:
 
 
 def estimate_player_strategy(row: pd.Series, player: str) -> str:
-    """根据单行 07c、07 或 06c 结果判断某个玩家当前显示策略。
+    """根据单行正式 07 结果判断某个玩家当前显示策略。
 
-    输入语义：row 是视频当前帧对应的 07 corrected weight 行，player 是 ``p1`` 或 ``p2``。
+    输入语义：row 是视频当前帧对应的 07 revised strategy 行，player 是 ``p1`` 或 ``p2``。
     输出语义：返回 ``STRATEGY_AGENTS`` 中的策略名，或 ``stay``/``vague``。
-    关键约束：优先使用 07c ``revised_strategy``，其次使用 07/06c ``strategy``；
-    只有这些标签均不存在时，才回退到 revised/original weight 的单行估计。
+    关键约束：优先使用正式 07 的 ``revised_strategy``，其次使用 06 保留的
+    ``strategy``；只有这些标签均不存在时，才回退到历史 weight 字段的单行估计。
     """
 
-    # 07c 不覆盖 06c 原始策略，而是另存 revised_strategy；视频优先展示修正结果，
-    # 同时保留对旧 07 ``p1_strategy`` 和未修正 06c 的兼容。
+    # 正式 07 不覆盖 06 原始策略，而是另存 revised_strategy；视频优先展示修正结果，
+    # 同时保留 strategy 和历史 weight 输入的只读兼容。
     for strategy_column in (f"{player}_revised_strategy", f"{player}_strategy"):
         if strategy_column in row.index:
             saved_strategy = strategy_name_from_saved_value(row[strategy_column])
@@ -381,8 +430,8 @@ def parse_context_range(value: Any) -> tuple[int, int] | None:
     输入语义：value 通常来自 ``p1_trial_context`` 或 ``p2_trial_context``，可以是
     tuple/list，也可能是字符串形式的 ``(start, end)``。
     输出语义：返回 ``(start_row_id, end_row_id)``，其中 end 是右开边界；缺失值返回 None。
-    关键约束：context 在 06 阶段使用 row_id 表达，视频显示前必须转成 frame_id，
-    否则容易把数据行号误读成原始游戏帧号。
+    关键约束：context 在 06 阶段使用 row_id 表达，视频显示前必须转成当前 trial 内的
+    0-based 视频帧序号，不能把数据行号误读成原始游戏帧号。
     """
 
     if value is None:
@@ -476,7 +525,7 @@ def draw_strategy_bar(
 ) -> None:
     """在地图上方绘制两个玩家当前拟合策略。
 
-    输入语义：row 是当前 06 weight 行，metadata 是当前画布坐标元数据，font 是文本字体。
+    输入语义：row 是当前 07 策略结果行，metadata 是当前画布坐标元数据，font 是文本字体。
     输出语义：在当前帧顶部绘制左右分离的 P1/P2 策略色块。
     关键约束：旧 gram 图中一个人两个连续测量会挨着画；这里是两个玩家各一个
     单测量，因此 P1 放左侧、P2 放右侧，中间留出明显空白，避免被误读为序列。
@@ -938,13 +987,13 @@ def render_tile_frame(
     context_video_frame_lookup: dict[int, int],
     aa: int = DEFAULT_AA,
 ) -> np.ndarray:
-    """把一条 06 weight 行渲染为视频帧。
+    """把一条 07 策略结果行渲染为视频帧。
 
-    输入语义：row 是某个 ``DayTrial`` 的一条 06 拟合结果记录，包含位置和策略字段。
+    输入语义：row 是某个 ``DayTrial`` 的一条 07 修正结果记录，包含位置和策略字段。
     输出语义：返回 imageio 可写入的视频帧 numpy 数组。
     关键约束：本函数不改变底图；当 aa>1 时先在高分辨率副本上绘制，再缩回
     底图尺寸，以减少 Pacman、ghost 和豆子边缘锯齿。context_video_frame_lookup
-    用于把 06 的 row_id context 显示成当前视频帧闭区间。
+    用于把 06 保留下来的 row_id context 显示成当前视频帧闭区间。
     """
 
     if aa <= 0:
@@ -1076,9 +1125,9 @@ def render_tile_frame(
 
 
 def collect_tile_files(tile_root: Path, task: str) -> list[Path]:
-    """收集指定任务下可用于视频绘制的 07 corrected weight 文件。
+    """收集指定任务下可用于视频绘制的 07 revised strategy 文件。
 
-    输入语义：tile_root 是 ``data/07_corrected_weight_data``，task 通常是 comp 或 coop。
+    输入语义：tile_root 默认是 ``data/07_revised_strategy_data``，task 通常是 comp 或 coop。
     输出语义：返回排序后的 pkl 路径列表。
     关键约束：脚本只处理当前嵌套目录结构，不兼容旧扁平目录。
     """
@@ -1093,7 +1142,7 @@ def collect_tile_files(tile_root: Path, task: str) -> list[Path]:
 
 
 def choose_tile_file(tile_root: Path, task: str, session: str | None) -> Path:
-    """选择要绘制的 07 corrected weight 文件。
+    """选择要绘制的 07 revised strategy 文件。
 
     输入语义：session 可以是文件名或不带后缀的 session stem；为空时使用任务下第一个文件。
     输出语义：返回一个存在的 pkl 路径。
@@ -1112,9 +1161,9 @@ def choose_tile_file(tile_root: Path, task: str, session: str | None) -> Path:
 
 
 def load_game_rows(tile_path: Path, trial: str | None, max_tiles: int | None) -> pd.DataFrame:
-    """读取一个 07c/07 策略文件中的某个 game。
+    """读取一个正式 07 策略文件中的某个 game。
 
-    输入语义：tile_path 指向 07 revise_human_weight 输出 pkl；trial 是可选 DayTrial。
+    输入语义：tile_path 指向 ``07_revised_strategy_data`` 输出 pkl；trial 是可选 DayTrial。
     输出语义：返回按原顺序排列的单个 game 行。
     关键约束：如果 trial 为空，默认选择文件中第一个 DayTrial，方便快速检查。
     """
@@ -1226,7 +1275,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-frames", action="store_true", help="同时把视频帧保存为 PNG 图片。")
     parser.add_argument("--frame-output-dir", type=Path, default=DEFAULT_FRAME_OUTPUT_DIR, help="图片帧输出根目录。")
     parser.add_argument("--task", default=DEFAULT_TASK, help="任务目录名，例如 comp 或 coop。")
-    parser.add_argument("--session", default=None, help="04 corrected tile 文件名或不带 .pkl 的 stem。")
+    parser.add_argument("--session", default=None, help="07 revised strategy 文件名或不带 .pkl 的 stem。")
     parser.add_argument("--trial", default=None, help="要绘制的 DayTrial；默认绘制文件中的第一个。")
     parser.add_argument("--max-tiles", type=int, default=None, help="可选：只绘制前 N 条 tile 行。")
     parser.add_argument("--cell-size", type=int, default=DEFAULT_CELL_SIZE)
@@ -1236,7 +1285,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """命令行入口：读取 07 corrected weight 数据并生成一个简易 game 视频。"""
+    """命令行入口：读取 07 revised strategy 数据并生成一个简易 game 视频。"""
 
     args = parse_args()
     tile_path = choose_tile_file(args.tile_root, args.task, args.session)
@@ -1276,7 +1325,7 @@ def main() -> None:
     print(f"aa：{args.aa}")
     print(f"地图范围：x={metadata['x_min']}..{metadata['x_max']}, y={metadata['y_min']}..{metadata['y_max']}")
     print("角色图形：旧 renderer 静态 sprite")
-    print("策略显示：优先使用 07c revised_strategy，其次使用 strategy，P1/P2 左右分离显示")
+    print("策略显示：优先使用 07 revised_strategy，其次使用 strategy，P1/P2 左右分离显示")
     print(f"输出视频：{output_path.resolve()}")
     if args.save_frames:
         print(f"输出图片帧：{frame_output_dir.resolve()}")

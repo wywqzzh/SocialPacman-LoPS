@@ -136,14 +136,14 @@ class ContextStrategyPosteriorTests(unittest.TestCase):
         self.assertEqual(contexts, [(0, 6)])
         self.assertEqual(is_stay, [False])
 
-    def test_teammate_high_impact_events_are_mergeable_soft_boundaries(self) -> None:
-        """验证队友高影响事件只在不会制造短段时切分当前玩家 context。
+    def test_teammate_energizer_is_soft_but_teammate_ghost_is_hard_boundary(self) -> None:
+        """验证队友 Energizer 可合并，而队友吃 ghost 是公共强边界。
 
-        输入语义：构造10行无转向 trial，分别放置临近起点和位于中部的队友 energizer，
-        并对照队友普通豆与当前玩家自己的 energizer。
+        输入语义：构造10行无转向 trial，分别放置临近起点和位于中部的队友 Energizer，
+        并对照队友普通豆、当前玩家 Energizer 与临近起点的队友吃 ghost。
         输出语义：队友事件在第1行时因前段长度1而合并，在第5行时保留；队友普通豆
-        永不共享，当前玩家自己的 energizer 始终作为硬边界保留。
-        关键约束：最短段长度沿用 stay_length=4，软边界合并不能跨越自己的硬边界。
+        永不共享，当前玩家 Energizer 与任一玩家吃 ghost 始终作为硬边界保留。
+        关键约束：最短段长度沿用 stay_length=4，但公共吃 ghost 边界不能参与合并。
         """
 
         def make_trial() -> pd.DataFrame:
@@ -188,6 +188,12 @@ class ContextStrategyPosteriorTests(unittest.TestCase):
         own_energizer = make_trial()
         own_energizer.loc[1, "p1_eat_energizer"] = True
         contexts, _ = build_event_context_segments(own_energizer, "p1", config)
+        self.assertEqual(contexts, [(0, 1), (1, 10)])
+
+        teammate_ghost = make_trial()
+        teammate_ghost.loc[1, "p2_eat_ghost"] = True
+        self.assertEqual(soft_teammate_event_points(teammate_ghost, "p1"), set())
+        contexts, _ = build_event_context_segments(teammate_ghost, "p1", config)
         self.assertEqual(contexts, [(0, 1), (1, 10)])
 
     def test_turnaround_action_no_longer_splits_context(self) -> None:

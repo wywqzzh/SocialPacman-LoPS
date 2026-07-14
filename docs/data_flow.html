@@ -159,6 +159,7 @@
       <table>
         <thead><tr><th>参数</th><th>默认值</th><th>含义</th></tr></thead>
         <tbody>
+          <tr><td><code>global_cluster_min_distance</code></td><td>2</td><td>距离 0/1 的单个资源不参与本行 Global 距离计算；同团距离至少为 2 的资源仍保留。</td></tr>
           <tr><td><code>global_cluster_radius</code></td><td>60</td><td>可进入 Cluster Global 的最远资源团距离。</td></tr>
           <tr><td><code>global_cluster_distance_threshold</code></td><td>2</td><td>资源点聚类的地图距离阈值；允许豆子之间存在一个空格。</td></tr>
           <tr><td><code>local_depth</code></td><td>10</td><td>Local 路径树深度。</td></tr>
@@ -169,6 +170,12 @@
           <tr><td><code>randomness_coeff / laziness_coeff</code></td><td>0 / 0</td><td>默认关闭扰动与惯性，保证可复现。</td></tr>
         </tbody>
       </table>
+      <p>
+        近距离过滤作用于资源团内部的单个资源，而不是整个 cluster。完整
+        <code>resource_positions</code> 继续用于跨行匹配；Q 只使用
+        <code>global_resource_positions</code>。因此一颗距离 0/1 的眼前豆由 Local 表达，
+        但不会让同一资源团中距离至少为 2 的远豆全部失去 Global 信息。
+      </p>
       <p>
         2026-07-11 已修复 ghost 状态被有限 float 误判为缺失，以及 Q_norm 生成过程原地改写
         raw Q 的问题。详细数值影响和验证见 <code>docs/05_utility_numeric_bug_audit.md</code>。
@@ -195,7 +202,7 @@
           <tr>
             <td><code>06b_fit_dynamic_strategy_event_context.py</code></td>
             <td><code>05_cluster_global_utility_data → 06_cluster_global_event_context_weight_data</code></td>
-            <td>事件硬边界、队友事件软边界、context 内 best Global，仍使用 GA 权重；掉头不切段。</td>
+            <td>玩家事件与公共吃鬼硬边界、队友 Energizer 软边界、context 内 best Global，仍使用 GA 权重；掉头不切段。</td>
           </tr>
           <tr>
             <td><code>06c_fit_context_strategy_posterior.py</code></td>
@@ -207,10 +214,10 @@
 
       <h3>06b/06c 的 context 边界</h3>
       <ul>
-        <li>trial 起止、当前玩家生死变化、吃 energizer、吃 ghost 是强边界。</li>
+        <li>trial 起止、当前玩家生死变化、当前玩家吃 Energizer、任一玩家吃 ghost 是强边界。</li>
         <li>连续吃普通豆的首尾是可抑制弱硬边界；强事件后 3 行内的吃豆开始、强事件前 3 行内的吃豆结束会被取消。</li>
-        <li>长度至少 4 的 stay 默认形成硬边界；当前玩家吃 ghost 前后 5 行内的 stay 不再额外切段。</li>
-        <li>队友吃 energizer/ghost 是软边界；软边界产生的短段只在同一硬区间内合并。</li>
+        <li>长度至少 4 的 stay 默认形成硬边界；任一玩家吃 ghost 前后 5 行内的 stay 不再额外切段。</li>
+        <li>队友吃 Energizer 是软边界；任一玩家吃 ghost 是双方不可合并的公共强边界。</li>
         <li>普通转向、掉头、玩家到 bean 的地图距离、ghost 计时恢复不再生成 context 边界。</li>
       </ul>
 

@@ -337,6 +337,45 @@ class CalculateUtilityStatusAndNormalizationTests(unittest.TestCase):
         self.assertGreater(raw_matrix[0][1], 0.0)
         self.assertEqual(normalized_matrix[0][1], 1.0)
 
+    def test_cluster_global_ignores_adjacent_resource_but_uses_far_cluster_members(self) -> None:
+        """验证一颗近豆不会让包含远豆的整个 Global cluster 失去信息。
+
+        输入语义：Pacman 位于直线位置1，同一 cluster 内包含距离1的豆子2和距离2的豆子3。
+        输出语义：距离1的豆子从本行 Global 距离计算排除，距离2的豆子仍使向右 Q 为正。
+        关键约束：完整 ``resource_positions`` 必须保留两颗豆以支持跨行 cluster 匹配；
+        新增 ``global_resource_positions`` 只包含真正参与本行 Global 计算的远豆子3。
+        """
+
+        positions = [(0, 0), (1, 0), (2, 0), (3, 0)]
+        adjacent_map = {
+            (0, 0): {"left": np.nan, "right": (1, 0), "up": np.nan, "down": np.nan},
+            (1, 0): {"left": (0, 0), "right": (2, 0), "up": np.nan, "down": np.nan},
+            (2, 0): {"left": (1, 0), "right": (3, 0), "up": np.nan, "down": np.nan},
+            (3, 0): {"left": (2, 0), "right": np.nan, "up": np.nan, "down": np.nan},
+        }
+        distance_map = {
+            source: {target: abs(source[0] - target[0]) for target in positions}
+            for source in positions
+        }
+        map_data = MapData(adjacent_map, distance_map, {1: 2, 2: 4, 8: 8, 9: 8})
+        row = pd.Series({"pacmanPos": (1, 0), "beans": [(2, 0), (3, 0)], "energizers": []})
+
+        raw_matrix, normalized_matrix, metadata = global_cluster_q_for_row(
+            row,
+            map_data,
+            adjacent_map,
+            CalculateUtilityConfig(),
+        )
+
+        self.assertEqual(len(raw_matrix), 1)
+        self.assertEqual(metadata[0]["resource_positions"], [(2, 0), (3, 0)])
+        self.assertEqual(metadata[0]["global_resource_positions"], [(3, 0)])
+        self.assertEqual(metadata[0]["ignored_near_resource_count"], 1)
+        self.assertEqual(metadata[0]["global_min_distance"], 2.0)
+        self.assertLess(raw_matrix[0][0], 0.0)
+        self.assertGreater(raw_matrix[0][1], 0.0)
+        self.assertEqual(normalized_matrix[0][1], 1.0)
+
     def test_real_frame_35_approach_reaches_scared_ghost_behind_dead_ghost(self) -> None:
         """验证 0-based 第35帧向左路径不会被中间的 dead ghost 错误终止。"""
 

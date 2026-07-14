@@ -46,8 +46,9 @@ class CalculateUtilityConfig:
     """保存集中 utility 计算阶段的配置。
 
     输入语义：utility_config 控制旧七策略 raw Q 的深度等参数；
-    global_cluster_min_distance/global_cluster_radius 控制 cluster Global 提供方向信息的
-    最近和最远资源团距离；global_cluster_distance_threshold 控制候选资源点的聚类半径。
+    global_cluster_min_distance/global_cluster_radius 控制单个资源点参与 cluster Global
+    距离计算的最近距离，以及有效 Global 目标的最远距离；
+    global_cluster_distance_threshold 控制候选资源点的聚类半径。
     utility_config 中旧 Global 使用的 global_ignore_depth 不直接限制 cluster Global。
     输出语义：配置对象被文件级和目录级处理函数共享。
     关键约束：当前阶段只生成逐行候选 utility，不根据 context 选择 best Global 或
@@ -220,9 +221,10 @@ def global_cluster_q_for_row(
     map_data/adjacent_map 来自统一地图常量；config 提供聚类阈值和 global 距离范围。
     输出语义：返回 raw utility 矩阵、normalized utility 矩阵和与矩阵行对齐的 meta。
     关键约束：这里不选择 best cluster。每个 cluster 的四方向 raw Q 表示“走该方向后
-    到这团资源的距离减少量 × cluster_size”；普通豆和 energizer 在 Global 中同权重，
-    因此 cluster_size 只按资源点数量计数。当最近资源距离小于配置的 Global 最小距离时，
-    候选仍保留用于跨行追踪，但合法方向全部置零，避免紧邻资源的局部采食与 Local 重叠。
+    到可参与 Global 的资源子集距离减少量 × 子集资源数”；普通豆和 energizer 同权重。
+    距离小于 ``global_cluster_min_distance`` 的眼前资源只从本行距离计算中排除，不删除
+    完整 cluster/meta；只要同一资源团还有较远资源，Global 就继续提供方向信息。只有
+    整团都落入局部范围时，合法方向才全部置零，避免单颗近豆令整个远程目标突然失效。
     """
 
     position = parse_position(row["pacmanPos"])
@@ -239,13 +241,21 @@ def global_cluster_q_for_row(
     meta_values: list[dict[str, Any]] = []
     for cluster_id, cluster in enumerate(clusters):
         min_distance = cluster_min_distance(position, cluster, map_data)
+        # 完整 cluster 继续用于跨行目标匹配；Global Q 只使用当前位置至少相距阈值
+        # 步数的资源。过滤集合在当前行固定，计算相邻位置距离时不能再次过滤，否则
+        # 朝距离2资源前进一步后会把该目标移除，反而无法得到正向推进 utility。
+        global_resources: set[tuple[int, int]] = set()
+        for resource in cluster:
+            resource_distance = map_distance(map_data, position, resource)
+            if np.isfinite(resource_distance) and resource_distance >= config.global_cluster_min_distance:
+                global_resources.add(resource)
+        global_min_distance = cluster_min_distance(position, global_resources, map_data)
         raw_q = [float("-inf")] * len(DIRECTION_NAMES)
-        # Global 只解释尚需一定路程才能到达的资源团。距离为 0/1 时，下一步采食属于
-        # Local 的即时资源范围；此时保留 cluster/meta，但让所有合法方向成为无信息 0。
-        # 最小阈值只排除紧邻资源，不恢复旧版 10 步忽略区间。
+        # 距离 0/1 的资源由 Local 表达；只要过滤后仍有距离 2 及以上的资源，Global
+        # 就朝剩余资源继续计算。半径上限仍针对过滤后的最近 Global 资源。
         in_global_range = (
-            np.isfinite(min_distance)
-            and config.global_cluster_min_distance <= min_distance <= config.global_cluster_radius
+            np.isfinite(global_min_distance)
+            and global_min_distance <= config.global_cluster_radius
         )
 
         for direction_index, direction in enumerate(DIRECTION_NAMES):
@@ -255,11 +265,13 @@ def global_cluster_q_for_row(
             if not in_global_range:
                 raw_q[direction_index] = 0.0
                 continue
-            next_distance = cluster_min_distance(adjacent_value, cluster, map_data)
+            next_distance = cluster_min_distance(adjacent_value, global_resources, map_data)
             if np.isfinite(next_distance):
-                # 一个资源点和一个 energizer 在 global 中贡献相同，cluster_size 因此是
-                # 目标团总资源数。后续 06 用归一化 Q 拟合，raw Q 主要保留解释尺度。
-                raw_q[direction_index] = (min_distance - next_distance) * len(cluster)
+                # 一个普通豆和一个 energizer 在 Global 中贡献相同。这里按真正参与本行
+                # Global 距离计算的资源数缩放；后续 06 使用归一化 Q，raw 尺度主要用于解释。
+                raw_q[direction_index] = (
+                    global_min_distance - next_distance
+                ) * len(global_resources)
             else:
                 raw_q[direction_index] = 0.0
 
@@ -273,6 +285,13 @@ def global_cluster_q_for_row(
                 "nearest_resource": nearest_cluster_resource(position, cluster, map_data),
                 "contains_energizer": any(resource in energizer_set for resource in resources),
                 "min_distance": min_distance,
+                # 以下字段明确区分完整 cluster 与本行真正参与 Global 距离计算的子集。
+                # ``resource_positions`` 保持完整，避免近资源过滤导致跨行 cluster 身份漂移。
+                "global_resource_positions": sorted(global_resources),
+                "global_resource_count": len(global_resources),
+                "ignored_near_resource_count": len(cluster) - len(global_resources),
+                "nearest_global_resource": nearest_cluster_resource(position, global_resources, map_data),
+                "global_min_distance": global_min_distance,
             }
         )
 

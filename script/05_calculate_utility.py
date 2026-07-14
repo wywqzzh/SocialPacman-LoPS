@@ -66,7 +66,10 @@ def parse_args() -> argparse.Namespace:
         "--global-cluster-min-distance",
         type=int,
         default=2,
-        help="Cluster Global 提供方向信息所需的最小资源团距离；距离 0/1 默认为 Local。",
+        help=(
+            "单个资源参与 Cluster Global 距离计算的最小距离；距离 0/1 的资源默认为 Local，"
+            "但同一资源团中的较远资源仍可提供 Global 信息。"
+        ),
     )
     parser.add_argument("--global-cluster-radius", type=int, default=60, help="Cluster Global 可考虑的最远资源团距离。")
     parser.add_argument(

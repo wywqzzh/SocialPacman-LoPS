@@ -1,9 +1,10 @@
 """事件硬边界版 Social Pacman 动态策略拟合。
 
 本模块是 06 动态策略拟合的实验新版。它复用旧 06 的权重拟合器和输出字段，
-只替换 context 划分方式：先按玩家自己的行为事件生成不可跨越的硬边界，再把队友
-造成的高影响公共环境事件作为软边界，最后在不跨硬边界的前提下合并软边界造成的
-过短段。玩家掉头只作为段内动作参与策略 likelihood，不再触发 context 切分。
+只替换 context 划分方式：先按玩家行为事件与公共吃鬼事件生成不可跨越的硬边界，
+再把队友吃 Energizer 造成的公共环境变化作为软边界，最后在不跨硬边界的前提下
+合并软边界造成的过短段。玩家掉头只作为段内动作参与策略 likelihood，不再触发
+context 切分。
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ OPPOSITE_DIRECTIONS: dict[str, str] = {
 }
 DIRECTION_NAMES: tuple[str, ...] = ("left", "right", "up", "down")
 DIRECTION_TO_INDEX: dict[str, int] = {direction: index for index, direction in enumerate(DIRECTION_NAMES)}
+PLAYER_PREFIXES: tuple[str, ...] = ("p1", "p2")
 
 
 def parse_position_collection(value: Any) -> list[Any]:
@@ -678,9 +680,9 @@ def hard_boundary_points(
     ghost_stay_suppression_window 指定吃 ghost 事件前后取消长 stay 切段作用的窗口。
     输出语义：返回局部行号边界集合，包含 0 和 len(trial_data)。
     关键约束：硬边界表达行为事件的语义变化；短段合并时绝对不能跨过这些边界。
-    普通豆起止是可抑制的弱硬边界；trial、生死、energizer 和吃 ghost 是始终保留的
-    强硬边界。长 stay 默认也是强边界，但若处于当前玩家吃 ghost 事件前后指定窗口，
-    则取消该 stay 的切段作用，避免 ghost 交互动画附近产生碎段。
+    普通豆起止是可抑制的弱硬边界；trial、生死、本人 energizer 和任一玩家吃 ghost
+    是始终保留的强硬边界。长 stay 默认也是强边界，但若处于公共吃 ghost 事件前后
+    指定窗口，则取消该 stay 的切段作用，避免 ghost 交互动画附近产生碎段。
     """
 
     row_count = len(trial_data)
@@ -736,17 +738,23 @@ def hard_boundary_points(
         energizer_indices = trial_data.index[trial_data[eat_energizer_column].astype(bool)].tolist()
         symmetric_boundaries.update(int(index) for index in energizer_indices)
 
-    # 吃 ghost 也只使用当前玩家自己的事件列。事件列标在 ghost 进入 dead 的行，
-    # 这里沿用上一版做法，只把状态转变行作为硬边界。
-    eat_ghost_column = f"{player}_eat_ghost"
+    # 任一玩家吃到 ghost 都会立即移除共享环境中的追逐目标，使两名玩家的 Approach
+    # utility 在同一事件行发生结构变化。因此这里使用 P1/P2 私有事件列的并集，为两名
+    # 玩家生成完全相同、且不能被短段合并删除的公共硬边界。原私有列保持不变，后续仍
+    # 可用于判断究竟由谁吃到 ghost。
     eaten_indices: list[int] = []
-    if eat_ghost_column in trial_data.columns:
-        eaten_indices = trial_data.index[trial_data[eat_ghost_column].astype(bool)].tolist()
-        for index in eaten_indices:
-            symmetric_boundaries.add(int(index))
+    for event_player in PLAYER_PREFIXES:
+        eat_ghost_column = f"{event_player}_eat_ghost"
+        if eat_ghost_column not in trial_data.columns:
+            continue
+        event_indices = trial_data.index[trial_data[eat_ghost_column].astype(bool)].tolist()
+        eaten_indices.extend(int(index) for index in event_indices)
+    eaten_indices = sorted(set(eaten_indices))
+    symmetric_boundaries.update(eaten_indices)
 
-    # 长 stay 默认作为强边界；但 ghost 被吃前后的停顿常来自交互/动画，而不是玩家主动
-    # stay。若整段 stay 距当前玩家任一 eat_ghost 行不超过窗口，则同时取消其起止边界。
+    # 长 stay 默认作为强边界；但 ghost 被任一玩家吃掉前后的停顿常来自交互/动画，
+    # 而不是当前玩家主动 stay。若整段 stay 距公共 eat_ghost 行不超过窗口，则同时
+    # 取消其起止边界，公共吃鬼硬边界本身仍始终保留。
     missing_flags = [action_is_missing(value) for value in trial_data["action_dir"]]
     long_stay_ranges = [
         (start, end)
@@ -755,7 +763,7 @@ def hard_boundary_points(
     ]
     suppressed_stay_ranges = suppress_stay_ranges_near_ghost(
         long_stay_ranges,
-        [int(index) for index in eaten_indices],
+        eaten_indices,
         ghost_stay_suppression_window,
     )
     for start, end in long_stay_ranges:
@@ -798,25 +806,24 @@ def soft_turnaround_points(trial_data: pd.DataFrame) -> set[int]:
 
 
 def soft_teammate_event_points(trial_data: pd.DataFrame, player: str) -> set[int]:
-    """生成队友高影响事件对应的公共环境软边界。
+    """生成队友吃 Energizer 对应的公共环境软边界。
 
     输入语义：trial_data 是单 trial 临时表，player 是当前正在划分 context 的玩家。
-    输出语义：返回另一名玩家吃 energizer 或 ghost 的真实事件行集合。
-    关键约束：这些事件改变两名玩家共同面对的 ghost 状态，但不代表当前玩家自己完成
-    了事件，因此只作为软边界；后续长度合并可以取消会制造过短 context 的边界。
-    普通豆事件不共享，ghost 按计时器自然恢复也不在这里生成边界。
+    输出语义：返回另一名玩家吃 Energizer 的真实事件行集合。
+    关键约束：队友吃 Energizer 改变公共 ghost 状态，但仍沿用可合并软边界规则；
+    任一玩家吃 ghost 已在 ``hard_boundary_points`` 中统一生成公共硬边界，不得再次
+    作为软边界。普通豆事件不共享，ghost 按计时器自然恢复也不在这里生成边界。
     """
 
     boundaries: set[int] = set()
     for teammate in ("p1", "p2"):
         if teammate == player:
             continue
-        for event_name in ("eat_energizer", "eat_ghost"):
-            column = f"{teammate}_{event_name}"
-            if column not in trial_data.columns:
-                continue
-            event_indices = trial_data.index[trial_data[column].astype(bool)].tolist()
-            boundaries.update(int(index) for index in event_indices)
+        column = f"{teammate}_eat_energizer"
+        if column not in trial_data.columns:
+            continue
+        event_indices = trial_data.index[trial_data[column].astype(bool)].tolist()
+        boundaries.update(int(index) for index in event_indices)
     return boundaries
 
 
@@ -869,15 +876,15 @@ def build_event_context_segments(
     player: str,
     config: DynamicStrategyFittingConfig | None = None,
 ) -> tuple[list[tuple[int, int]], list[bool]]:
-    """按玩家事件硬边界和队友事件软边界构造全局 context 段落。
+    """按玩家事件、公共吃鬼硬边界和队友 Energizer 软边界构造 context。
 
     输入语义：prepared_data 是 ``prepare_fitting_dataframe`` 生成的玩家临时表，
     player 是当前拟合玩家。
     输出语义：返回全局 row_id 半开区间列表，以及每个区间是否为 stay/all-NaN 段。
-    关键约束：短段合并只发生在同一硬边界区间内部，绝不跨当前玩家自己的 trial、
-    吃豆段、生死、energizer、吃 ghost 或长 stay 硬边界。软边界只来自队友的
-    energizer/ghost 事件；队友事件只有在两侧能形成足够长段落时才保留。掉头、普通
-    转向、玩家到普通豆的距离和 ghost 计时恢复都不再生成 context 边界。
+    关键约束：短段合并只发生在同一硬边界区间内部，绝不跨 trial、吃豆段、生死、
+    本人 energizer、任一玩家吃 ghost 或长 stay 硬边界。软边界只来自队友的
+    Energizer 事件，只有在两侧能形成足够长段落时才保留。掉头、普通转向、玩家到
+    普通豆的距离和 ghost 计时恢复都不再生成 context 边界。
     """
 
     config = DynamicStrategyFittingConfig() if config is None else config
@@ -899,8 +906,8 @@ def build_event_context_segments(
             )
         )
         # 玩家自己的掉头只作为段内动作进入后续 likelihood，不再用同一动作变量预先
-        # 切段。队友吃 energizer/ghost 会改变公共 ghost 环境，因此仍作为候选软边界，
-        # 并经过 min_length 合并，避免公共事件制造碎段。
+        # 切段。队友吃 Energizer 仍作为候选软边界并经过 min_length 合并；任一玩家
+        # 吃 ghost 已进入 hard_boundaries，不能在这里被短段合并撤销。
         soft_boundaries = soft_teammate_event_points(trial_data, player)
 
         trial_contexts: list[tuple[int, int]] = []

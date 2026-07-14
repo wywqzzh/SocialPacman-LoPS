@@ -11,6 +11,7 @@ import pandas as pd
 from LoPS.context_strategy_posterior import (
     ContextObservation,
     ContextStrategyPosteriorConfig,
+    apply_best_approach_candidates,
     apply_best_energizer_candidates,
     batch_total_context_nll,
     build_observation_batch,
@@ -43,6 +44,56 @@ class ContextStrategyPosteriorTests(unittest.TestCase):
         actual = normalize_legal_q([-2.0, 0.0, 2.0, -np.inf])
         np.testing.assert_allclose(actual[:3], [0.0, 0.5, 1.0])
         self.assertTrue(np.isneginf(actual[3]))
+
+    def test_best_approach_can_select_farther_ghost_target(self) -> None:
+        """验证 context 动作证据可以选择远鬼，而不是固定选择最近 ghost。
+
+        输入语义：构造三个持续向右动作；近处 Ghost1 候选预测左，远处 Ghost2 候选
+        预测右，并让两只 ghost 的位置逐行变化但身份保持稳定。
+        输出语义：06c 选择 Ghost2，并把它的 Q 写入正式 Approach 拟合视图。
+        关键约束：跨行匹配必须使用 target_id，不能使用动态位置或候选列表下标。
+        """
+
+        data = pd.DataFrame(
+            {
+                "action_dir": ["right", "right", "right"],
+                "p1_approach_Q": [[0.0, 0.0, -np.inf, -np.inf]] * 3,
+                "p1_approach_utility_k": [
+                    [[1.0, 0.0, -np.inf, -np.inf], [0.0, 1.0, -np.inf, -np.inf]],
+                    [[1.0, 0.0, -np.inf, -np.inf], [0.0, 1.0, -np.inf, -np.inf]],
+                    [[1.0, 0.0, -np.inf, -np.inf], [0.0, 1.0, -np.inf, -np.inf]],
+                ],
+                "p1_approach_utility_k_norm": [
+                    [[1.0, 0.0, -np.inf, -np.inf], [0.0, 1.0, -np.inf, -np.inf]],
+                    [[1.0, 0.0, -np.inf, -np.inf], [0.0, 1.0, -np.inf, -np.inf]],
+                    [[1.0, 0.0, -np.inf, -np.inf], [0.0, 1.0, -np.inf, -np.inf]],
+                ],
+                "p1_approach_utility_k_meta": [
+                    [
+                        {"target_id": "ghost1", "target_position": (1, 0), "min_distance": 1},
+                        {"target_id": "ghost2", "target_position": (10, 0), "min_distance": 10},
+                    ],
+                    [
+                        {"target_id": "ghost1", "target_position": (0, 0), "min_distance": 1},
+                        {"target_id": "ghost2", "target_position": (9, 0), "min_distance": 9},
+                    ],
+                    [
+                        {"target_id": "ghost1", "target_position": (-1, 0), "min_distance": 1},
+                        {"target_id": "ghost2", "target_position": (8, 0), "min_distance": 8},
+                    ],
+                ],
+            }
+        )
+
+        selected = apply_best_approach_candidates(data, [(0, 3)], "p1")
+
+        self.assertEqual(selected.at[0, "best_approach_target_id"], "ghost2")
+        self.assertEqual(selected.at[0, "best_approach_target_prob_accuracy"], 1.0)
+        for row_index in range(3):
+            np.testing.assert_array_equal(
+                selected.at[row_index, "p1_approach_Q"],
+                [0.0, 1.0, -np.inf, -np.inf],
+            )
 
     def test_bean_boundaries_are_suppressed_only_on_event_facing_side(self) -> None:
         """验证 3-tile 窗口只删除朝向强事件一侧的普通豆边界。"""

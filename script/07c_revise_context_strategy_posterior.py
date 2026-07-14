@@ -95,6 +95,7 @@ def discover_posterior_players(data: pd.DataFrame) -> list[str]:
             f"{player}_eat_ghost",
             f"{player}_selected_global_Q",
             f"{player}_selected_energizer_Q",
+            f"{player}_selected_approach_Q",
         }
         required.update(f"{player}_{agent}_Q" for agent in DEFAULT_AGENTS if agent != "global")
         missing = sorted(required - set(data.columns))
@@ -164,6 +165,8 @@ def prepare_revision_view(data: pd.DataFrame, player: str) -> pd.DataFrame:
             raw_column = f"{player}_selected_global_Q"
         elif agent == "energizer":
             raw_column = f"{player}_selected_energizer_Q"
+        elif agent == "approach":
+            raw_column = f"{player}_selected_approach_Q"
         else:
             raw_column = f"{player}_{agent}_Q"
         normalized_values: list[list[float]] = []
@@ -262,11 +265,12 @@ def revise_context_strategy_posterior_dataframe(
     result.attrs = copy.deepcopy(data.attrs)
     result.attrs["context_strategy_posterior_revision"] = {
         "version": "07c-v8",
-        "source": "06c_context_strategy_posterior_v5",
+        "source": "06c_context_strategy_posterior_v6",
         "initial_strategy_score": "coverage_gated_strategy_posterior",
         "q_normalization": "per_player_tile_strategy_legal_direction_minmax_from_raw_q",
         "global_q_source": "selected_global_Q",
         "energizer_q_source": "selected_energizer_Q",
+        "approach_q_source": "selected_approach_Q",
         "energizer_outcome_rule": (
             "context_end_eat_event_and_energizer_accuracy_ge_0.70_"
             "and_relative_to_best_ge_0.80"

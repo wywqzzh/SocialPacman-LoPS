@@ -1,15 +1,17 @@
 """Social Pacman utility 的集中计算、修正和归一化流程。
 
-本模块为 corrected tile 数据中的每个玩家分别计算七种行为策略的 Q 值。Global
-和 Energizer 另外保存逐行目标候选：Global 的目标是一团资源，Energizer 的目标
-是一个明确的 energizer 坐标。输入是一行保存公共状态与多个玩家状态的 joint-state
-表，输出仍保持一行 joint-state，避免破坏合作/竞争分析需要的同一时刻对齐关系。
+本模块为 corrected tile 数据中的每个玩家分别计算七种行为策略的 Q 值。Global、
+Energizer 和 Approach 另外保存逐行目标候选：Global 的目标是一团资源，Energizer
+的目标是一个明确的 energizer 坐标，Approach 的目标是一只身份稳定的 ghost。
+输入是一行保存公共状态与多个玩家状态的 joint-state 表，输出仍保持一行 joint-state，
+避免破坏合作/竞争分析需要的同一时刻对齐关系。
 """
 
 from __future__ import annotations
 
 import ast
 import pickle
+from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -340,6 +342,160 @@ def energizer_target_q_for_row(
                 "target_id": target_position,
                 "target_position": target_position,
                 "min_distance": current_distance,
+            }
+        )
+
+    norm_matrix = [normalize_global_cluster_q(row_values).tolist() for row_values in raw_matrix]
+    return raw_matrix, norm_matrix, meta_values
+
+
+def parse_ghost_status(value: Any) -> int:
+    """把 ghost 状态整理为可用于候选过滤的整数。
+
+    输入语义：value 来自 ``ghostN_status`` 或 ``ifscaredN``，允许 Python/numpy 整数
+    以及表示整数的有限浮点数。
+    输出语义：返回对应整数状态码。
+    关键约束：缺失、无穷或非整数状态直接报错；状态 3 表示死亡 ghost，不能作为
+    Approach 目标，其余已有状态继续沿用当前“正常鬼也可被主动追逐”的研究定义。
+    """
+
+    if value is None or isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"非法 ghost 状态：{value!r}")
+    numeric = float(value)
+    if not np.isfinite(numeric) or not numeric.is_integer():
+        raise ValueError(f"非法 ghost 状态：{value!r}")
+    return int(numeric)
+
+
+def parse_optional_position(value: Any) -> tuple[int, int] | None:
+    """尝试把可缺失位置解析为坐标。
+
+    输入语义：value 来自 ghost 位置字段，可能是坐标、空 tuple 或缺失标记。
+    输出语义：合法坐标返回 ``(x, y)``，缺失或空位置返回 None。
+    关键约束：本函数只容忍明确的缺失形式；其它畸形非空值仍由 ``parse_position``
+    抛出异常，避免把数据损坏误当成 ghost 暂时不存在。
+    """
+
+    if value is None or (isinstance(value, (float, np.floating)) and pd.isna(value)):
+        return None
+    parsed = parse_literal_if_needed(value)
+    if isinstance(parsed, (tuple, list)) and len(parsed) == 0:
+        return None
+    return parse_position(parsed)
+
+
+def shortest_nonreversing_target_path_length(
+    start_position: tuple[int, int],
+    first_position: tuple[int, int],
+    target_position: tuple[int, int],
+    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
+    max_depth: int,
+) -> int | None:
+    """计算固定首步后首次到达目标的最短非立即折返路径。
+
+    输入语义：start_position 是当前 Pacman 位置，first_position 是已经选定的下一格，
+    target_position 是本候选 ghost；max_depth 按从 Pacman 当前格开始的移动步数计数。
+    输出语义：在深度内可到达目标时返回总步数，否则返回 None。
+    关键约束：搜索状态保存有向边 ``(上一格, 当前格)``，每一步禁止立即回到上一格，
+    与现有共享路径树一致。其它 ghost 不作为静态障碍：它们会逐帧移动，当前坐标不能
+    阻断未来整条路径；同时本候选只在到达目标 ghost 时结算奖励，因此不会累计其它鬼。
+    """
+
+    if max_depth < 1:
+        return None
+    if first_position == target_position:
+        return 1
+
+    # 同一张稀疏地图中最短非折返路径无需重复经过相同有向边；用 visited 控制循环，
+    # 既保持 tunnel/环路可搜索，也避免深度较大时枚举指数数量的重复路径。
+    frontier: deque[tuple[tuple[int, int], tuple[int, int], int]] = deque(
+        [(start_position, first_position, 1)]
+    )
+    visited = {(start_position, first_position)}
+    while frontier:
+        previous, current, depth = frontier.popleft()
+        if depth >= max_depth:
+            continue
+        for next_position in adjacent_map[current].values():
+            if not isinstance(next_position, tuple) or next_position == previous:
+                continue
+            next_depth = depth + 1
+            if next_position == target_position:
+                return next_depth
+            directed_state = (current, next_position)
+            if directed_state in visited:
+                continue
+            visited.add(directed_state)
+            frontier.append((current, next_position, next_depth))
+    return None
+
+
+def approach_target_q_for_row(
+    row: pd.Series,
+    map_data: MapData,
+    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
+    config: CalculateUtilityConfig,
+) -> tuple[list[list[float]], list[list[float]], list[dict[str, Any]]]:
+    """为单行生成按 ghost 身份分开的目标导向 Approach 候选。
+
+    输入语义：row 是单玩家视角的一行，包含 ``pacmanPos``、两只 ghost 的位置与状态；
+    config 中的 Approach 深度和折扣控制目标可见范围及距离衰减。
+    输出语义：返回 ``非死亡 ghost 数×4`` raw utility、归一化矩阵和逐目标 meta。
+    关键约束：每个候选只奖励命中自己的目标，另一只 ghost 不提供奖励、也不作为静态
+    障碍。Ghost1/Ghost2 身份是跨行匹配键，位置允许随帧移动。05只生成候选，不读取
+    真实动作，也不决定 context 的最终追逐目标。
+    """
+
+    position = parse_position(row["pacmanPos"])
+    target_specs: list[tuple[str, tuple[int, int], int]] = []
+    for ghost_number in range(1, 3):
+        position_value = parse_optional_position(row.get(f"ghost{ghost_number}Pos"))
+        status_column = (
+            f"ghost{ghost_number}_status"
+            if f"ghost{ghost_number}_status" in row.index
+            else f"ifscared{ghost_number}"
+        )
+        status = parse_ghost_status(row[status_column])
+        if position_value is None or position_value not in adjacent_map or status == 3:
+            continue
+        target_specs.append((f"ghost{ghost_number}", position_value, status))
+
+    raw_matrix: list[list[float]] = []
+    meta_values: list[dict[str, Any]] = []
+    approach_depth = int(config.utility_config.approach_depth)
+    discount = float(config.utility_config.approach_discount_factor)
+    reward = float(map_data.reward_amount[8])
+
+    for target_id, target_position, target_status in target_specs:
+        raw_q = [float("-inf")] * len(DIRECTION_NAMES)
+        first_hit_depths: list[int | None] = [None] * len(DIRECTION_NAMES)
+        for direction_index, direction in enumerate(DIRECTION_NAMES):
+            adjacent_value = adjacent_map[position][direction]
+            if not isinstance(adjacent_value, tuple):
+                continue
+            path_length = shortest_nonreversing_target_path_length(
+                position,
+                adjacent_value,
+                target_position,
+                adjacent_map,
+                approach_depth,
+            )
+            first_hit_depths[direction_index] = path_length
+            if path_length is None:
+                raw_q[direction_index] = 0.0
+            else:
+                raw_q[direction_index] = reward * (discount ** (path_length - 1))
+
+        raw_matrix.append(raw_q)
+        meta_values.append(
+            {
+                "target_id": target_id,
+                "target_position": target_position,
+                "target_status": target_status,
+                "min_distance": map_distance(map_data, position, target_position),
+                "first_hit_depths": first_hit_depths,
+                "approach_depth": approach_depth,
+                "discount_factor": discount,
             }
         )
 
@@ -752,15 +908,30 @@ def energizer_target_candidate_columns() -> tuple[str, str, str]:
     return ("energizer_utility_k", "energizer_utility_k_norm", "energizer_utility_k_meta")
 
 
+def approach_target_candidate_columns() -> tuple[str, str, str]:
+    """返回05阶段新增的目标导向 Approach 候选字段。
+
+    输入语义：无。
+    输出语义：返回 raw 候选矩阵、归一化候选矩阵和 ghost 目标 meta 三个字段名。
+    关键约束：矩阵每一行对应稳定 ghost 身份，而不是随位置或列表顺序变化的临时编号。
+    """
+
+    return ("approach_utility_k", "approach_utility_k_norm", "approach_utility_k_meta")
+
+
 def utility_candidate_columns() -> tuple[str, ...]:
     """返回05保存的全部逐行目标候选字段。
 
     输入语义：无。
-    输出语义：按 Global 候选在前、Energizer 候选在后的稳定顺序返回字段。
+    输出语义：按 Global、Energizer、Approach 的稳定顺序返回字段。
     关键约束：该顺序只用于初始化和写回，不表示两种策略的优先级。
     """
 
-    return (*global_cluster_candidate_columns(), *energizer_target_candidate_columns())
+    return (
+        *global_cluster_candidate_columns(),
+        *energizer_target_candidate_columns(),
+        *approach_target_candidate_columns(),
+    )
 
 
 def prefixed_global_cluster_candidate_columns(player: str) -> list[str]:
@@ -778,7 +949,7 @@ def prefixed_utility_candidate_columns(player: str) -> list[str]:
     """返回某个玩家的全部逐行目标候选字段名。
 
     输入语义：player 是 ``p1`` 或 ``p2``。
-    输出语义：返回 Global 与 Energizer 候选的玩家前缀字段。
+    输出语义：返回 Global、Energizer 与 Approach 候选的玩家前缀字段。
     关键约束：单人文件只调用现有玩家，不会创建缺失玩家的候选列。
     """
 
@@ -844,6 +1015,42 @@ def append_energizer_target_candidate_columns(
     return result
 
 
+def append_approach_target_candidate_columns(
+    data: pd.DataFrame,
+    map_data: MapData,
+    adjacent_map: dict[tuple[int, int], dict[str, tuple[int, int] | float]],
+    config: CalculateUtilityConfig,
+) -> pd.DataFrame:
+    """为单玩家视角追加按 ghost 身份分开的 Approach 候选字段。
+
+    输入语义：data 已完成普通 Q、Global 和 Energizer 候选计算；config 提供当前正式
+    Approach 搜索深度与距离衰减。
+    输出语义：返回追加 ``approach_utility_k*`` 三个字段的新 DataFrame。
+    关键约束：不覆盖旧 ``approach_Q``，使05输出仍可用于回归诊断；06c会在 context
+    级选定目标后，把候选写入自己的正式 Approach 拟合视图。
+    """
+
+    result = data.copy(deep=True)
+    raw_values: list[list[list[float]]] = []
+    norm_values: list[list[list[float]]] = []
+    meta_values: list[list[dict[str, Any]]] = []
+    for _, row in result.iterrows():
+        raw_matrix, norm_matrix, meta = approach_target_q_for_row(
+            row,
+            map_data,
+            adjacent_map,
+            config,
+        )
+        raw_values.append(raw_matrix)
+        norm_values.append(norm_matrix)
+        meta_values.append(meta)
+
+    result["approach_utility_k"] = raw_values
+    result["approach_utility_k_norm"] = norm_values
+    result["approach_utility_k_meta"] = meta_values
+    return result
+
+
 def calculate_player_utility(
     frame_data: pd.DataFrame,
     player: str,
@@ -889,6 +1096,12 @@ def calculate_player_utility(
         calculated_utility,
         map_data,
         adjacent_map,
+    )
+    calculated_utility = append_approach_target_candidate_columns(
+        calculated_utility,
+        map_data,
+        adjacent_map,
+        config,
     )
 
     target_indices = frame_data.index[row_mask]

@@ -1,8 +1,9 @@
 """06c：基于事件 Context 的潜在策略后验推断。
 
 本模块复用 06b 已验证的玩家私有事件和 context 划分，再把每段 GA 权重拟合替换为
-概率模型：先按 06b 规则选择解释动作最好的 Global cluster，随后统一归一化七种
-策略的 raw Q，通过 softmax 得到动作概率。context 内信息覆盖率不足的策略先被
+概率模型：先在 context 内分别选择解释动作最好的 Global cluster、Energizer 目标
+和 Approach ghost 目标，随后统一归一化七种策略的 raw Q，通过 softmax 得到动作概率。
+context 内信息覆盖率不足的策略先被
 排除，posterior 和文件级 temperature 只使用覆盖率合格的行为策略。策略在某行的
 合法方向 Q 全相等时，使用独立于 beta 的固定无信息惩罚，避免无信息均匀预测比
 明确错误获得过多优势。合法方向均匀分布的 Null 仍只作为诊断基线。
@@ -237,6 +238,9 @@ def discover_posterior_players(data: pd.DataFrame, config: ContextStrategyPoster
             f"{player}_energizer_utility_k",
             f"{player}_energizer_utility_k_norm",
             f"{player}_energizer_utility_k_meta",
+            f"{player}_approach_utility_k",
+            f"{player}_approach_utility_k_norm",
+            f"{player}_approach_utility_k_meta",
         }
         required.update(f"{player}_{agent}_Q" for agent in config.agents)
         missing = sorted(required - set(data.columns))
@@ -514,6 +518,190 @@ def apply_best_energizer_candidates(
     return result
 
 
+def approach_target_id(meta: dict[str, Any]) -> str | None:
+    """从05 Approach 候选 meta 中读取稳定 ghost 身份。
+
+    输入语义：meta 对应某行候选矩阵中的一行。
+    输出语义：合法时返回 ``ghost1`` 或 ``ghost2``，否则返回 None。
+    关键约束：位置会逐帧移动，不能拿 ``target_position`` 作为跨行匹配键；ghost 身份
+    才是同一 context 中保持稳定的目标标识。
+    """
+
+    value = meta.get("target_id")
+    return value if value in {"ghost1", "ghost2"} else None
+
+
+def match_approach_target_index(
+    row_meta: list[dict[str, Any]],
+    target_id: str,
+) -> int | None:
+    """在某一行候选列表中匹配同一只目标 ghost。
+
+    输入语义：row_meta 与候选矩阵逐行对齐，target_id 来自 context 起点。
+    输出语义：目标仍是非死亡状态时返回矩阵行号，否则返回 None。
+    关键约束：目标位置变化不影响匹配；若目标已死亡或缺失，05不会生成该候选，
+    当前行应按无信息处理，不能改用同一下标的另一只 ghost。
+    """
+
+    for index, meta in enumerate(row_meta):
+        if approach_target_id(meta) == target_id:
+            return index
+    return None
+
+
+def score_context_approach_candidate(
+    data: pd.DataFrame,
+    context: tuple[int, int],
+    player: str,
+    start_meta: dict[str, Any],
+) -> dict[str, Any]:
+    """计算一只明确 ghost 目标对整个 context 动作的解释能力。
+
+    输入语义：data 是单玩家临时视图；context 是半开区间；start_meta 描述 context
+    起点的一只非死亡 ghost。
+    输出语义：返回概率准确率、集合准确率、起点距离和稳定 ghost 身份。
+    关键约束：所有真实动作行都进入分母；候选缺失或无正向预测时贡献0。目标选择只
+    使用逐帧 utility 和动作，不读取 context 结束时是否真的吃到 ghost。
+    """
+
+    target_id = approach_target_id(start_meta)
+    if target_id is None:
+        return {
+            "target_id": None,
+            "target_position": None,
+            "start_distance": float("inf"),
+            "valid_actions": 0,
+            "prob_accuracy": 0.0,
+            "set_accuracy": 0.0,
+            "meta": start_meta,
+        }
+
+    start, end = context
+    valid_actions = 0
+    probability_credit = 0.0
+    set_hits = 0
+    matrix_column = f"{player}_approach_utility_k_norm"
+    meta_column = f"{player}_approach_utility_k_meta"
+    for row_index in range(start, end):
+        action = data.at[row_index, "action_dir"]
+        if not isinstance(action, str):
+            continue
+        valid_actions += 1
+        row_meta = parse_global_cluster_meta(data.at[row_index, meta_column])
+        matched_index = match_approach_target_index(row_meta, target_id)
+        if matched_index is None:
+            continue
+        matrix = parse_global_cluster_matrix(data.at[row_index, matrix_column])
+        if matched_index >= matrix.shape[0]:
+            continue
+        prediction_indices = positive_prediction_indices(matrix[matched_index])
+        if not prediction_indices:
+            continue
+        true_index = DIRECTION_TO_INDEX[action]
+        if true_index in prediction_indices:
+            set_hits += 1
+            probability_credit += 1.0 / len(prediction_indices)
+
+    return {
+        "target_id": target_id,
+        "target_position": parse_position_or_none(start_meta.get("target_position")),
+        "start_distance": float(start_meta.get("min_distance", np.inf)),
+        "valid_actions": valid_actions,
+        "prob_accuracy": probability_credit / valid_actions if valid_actions else 0.0,
+        "set_accuracy": set_hits / valid_actions if valid_actions else 0.0,
+        "meta": start_meta,
+    }
+
+
+def choose_best_approach_candidate(
+    data: pd.DataFrame,
+    context: tuple[int, int],
+    player: str,
+) -> dict[str, Any] | None:
+    """为一个 player-context 选择解释动作最好的 Approach 目标。
+
+    输入语义：data 已包含05候选字段；context 是半开区间；player 指定玩家。
+    输出语义：返回最佳 ghost 目标评分；context 起点没有非死亡 ghost 时返回 None。
+    关键约束：破平依次使用概率准确率、集合准确率、较近起点距离和较小 ghost 编号；
+    Ghost1/Ghost2 只在候选内部竞争，选定后仍作为一个顶层 Approach 策略参与 posterior。
+    """
+
+    start, _ = context
+    meta_column = f"{player}_approach_utility_k_meta"
+    start_meta_values = parse_global_cluster_meta(data.at[start, meta_column])
+    scored = [
+        score_context_approach_candidate(data, context, player, meta)
+        for meta in start_meta_values
+        if approach_target_id(meta) is not None
+    ]
+    if not scored:
+        return None
+    return max(
+        scored,
+        key=lambda item: (
+            item["prob_accuracy"],
+            item["set_accuracy"],
+            -item["start_distance"],
+            -int(item["target_id"].removeprefix("ghost")),
+        ),
+    )
+
+
+def apply_best_approach_candidates(
+    data: pd.DataFrame,
+    contexts: list[tuple[int, int]],
+    player: str,
+) -> pd.DataFrame:
+    """在 context 级选择 best Approach，并写入06c临时正式 Q。
+
+    输入语义：data 已完成 Global/Energizer 目标选择；contexts 是当前玩家的完整分段。
+    输出语义：返回新视图，其中 ``<player>_approach_Q`` 已替换为每段最佳 ghost 目标
+    Q，并新增 selected Q、目标身份、起点位置、准确率和 meta 解释列。
+    关键约束：05原始候选和旧混合 Approach Q 均不被覆盖；目标中途缺失时保留当前
+    tile 的合法方向 mask，但有限方向全置0，明确表示该目标当行没有信息。
+    """
+
+    result = data.copy(deep=True)
+    selected_column = "selected_approach_Q"
+    best_columns = {
+        "best_approach_target_id": np.nan,
+        "best_approach_target_position": np.nan,
+        "best_approach_target_prob_accuracy": np.nan,
+        "best_approach_target_set_accuracy": np.nan,
+        "best_approach_target_meta": np.nan,
+    }
+    result[selected_column] = pd.Series([np.nan] * len(result), index=result.index, dtype=object)
+    for column, default in best_columns.items():
+        result[column] = pd.Series([default] * len(result), index=result.index, dtype=object)
+
+    raw_column = f"{player}_approach_utility_k"
+    meta_column = f"{player}_approach_utility_k_meta"
+    formal_column = f"{player}_approach_Q"
+    for context in contexts:
+        best = choose_best_approach_candidate(result, context, player)
+        start, end = context
+        target_id = best["target_id"] if best is not None else None
+        for row_index in range(start, end):
+            raw_q = q_like_zero(result.at[row_index, formal_column])
+            if target_id is not None:
+                row_meta = parse_global_cluster_meta(result.at[row_index, meta_column])
+                matched_index = match_approach_target_index(row_meta, target_id)
+                if matched_index is not None:
+                    raw_matrix = parse_global_cluster_matrix(result.at[row_index, raw_column])
+                    if matched_index < raw_matrix.shape[0]:
+                        raw_q = raw_matrix[matched_index].tolist()
+
+            result.at[row_index, formal_column] = raw_q
+            result.at[row_index, selected_column] = raw_q
+            if best is not None:
+                result.at[row_index, "best_approach_target_id"] = target_id
+                result.at[row_index, "best_approach_target_position"] = best["target_position"]
+                result.at[row_index, "best_approach_target_prob_accuracy"] = best["prob_accuracy"]
+                result.at[row_index, "best_approach_target_set_accuracy"] = best["set_accuracy"]
+                result.at[row_index, "best_approach_target_meta"] = best["meta"]
+    return result
+
+
 def build_context_observation(
     view: pd.DataFrame,
     player: str,
@@ -598,7 +786,8 @@ def prepare_player_data(
 
     输入语义：data 是已经追加私有事件列的 joint-state 表。
     输出语义：返回临时玩家视图和按顺序排列的 ContextObservation。
-    关键约束：context 构造调用 06b 原函数；best Global 也调用 06b 原函数，确保规则一致。
+    关键约束：context 构造调用 06b 原函数；Global、Energizer、Approach 都先在完整
+    context 上选定目标，再构造统一的七策略概率观测。
     """
 
     view = prepare_player_view(data, player, config)
@@ -615,6 +804,7 @@ def prepare_player_data(
     )
     selected_view = apply_best_global_candidates(view, contexts, player)
     selected_view = apply_best_energizer_candidates(selected_view, contexts, player)
+    selected_view = apply_best_approach_candidates(selected_view, contexts, player)
     observations = [
         build_context_observation(selected_view, player, context, stay, config)
         for context, stay in zip(contexts, is_stay)
@@ -1176,6 +1366,12 @@ def initialize_player_output(index: pd.Index, player: str) -> pd.DataFrame:
         "best_energizer_target_prob_accuracy",
         "best_energizer_target_set_accuracy",
         "best_energizer_target_meta",
+        "selected_approach_Q",
+        "best_approach_target_id",
+        "best_approach_target_position",
+        "best_approach_target_prob_accuracy",
+        "best_approach_target_set_accuracy",
+        "best_approach_target_meta",
         "trial_context",
         "strategy_log_likelihood",
         "strategy_information_coverage",
@@ -1222,6 +1418,25 @@ def write_player_posterior(
             ("best_global_cluster_prob_accuracy", "best_global_cluster_prob_accuracy"),
             ("best_global_cluster_set_accuracy", "best_global_cluster_set_accuracy"),
             ("best_global_cluster_meta", "best_global_cluster_meta"),
+        ):
+            values = [copy.deepcopy(prepared.view.at[index, source]) for index in labels]
+            output.loc[labels, f"{player}_{target}"] = pd.Series(values, index=labels, dtype=object)
+
+        selected_approach_q = [
+            copy.deepcopy(prepared.view.at[index, "selected_approach_Q"])
+            for index in labels
+        ]
+        output.loc[labels, f"{player}_selected_approach_Q"] = pd.Series(
+            selected_approach_q,
+            index=labels,
+            dtype=object,
+        )
+        for source, target in (
+            ("best_approach_target_id", "best_approach_target_id"),
+            ("best_approach_target_position", "best_approach_target_position"),
+            ("best_approach_target_prob_accuracy", "best_approach_target_prob_accuracy"),
+            ("best_approach_target_set_accuracy", "best_approach_target_set_accuracy"),
+            ("best_approach_target_meta", "best_approach_target_meta"),
         ):
             values = [copy.deepcopy(prepared.view.at[index, source]) for index in labels]
             output.loc[labels, f"{player}_{target}"] = pd.Series(values, index=labels, dtype=object)
@@ -1374,7 +1589,7 @@ def fit_context_strategy_posterior_dataframe(
     # CV 信息。global_selection_uses_context_actions 显式提醒后续分析其乐观偏差来源。
     result.attrs = copy.deepcopy(raw_data.attrs)
     result.attrs["context_strategy_posterior_model"] = {
-        "version": "06c-v5",
+        "version": "06c-v6",
         "strategy_order": list(config.agents),
         "strategy_number": {name: STRATEGY_NUMBER[name] for name in config.agents},
         "normalization": "per_player_tile_strategy_legal_direction_minmax_from_raw_q",
@@ -1394,6 +1609,10 @@ def fit_context_strategy_posterior_dataframe(
         "energizer_selection_rule": "context_probability_accuracy_by_target_position",
         "energizer_selection_uses_context_actions": True,
         "energizer_outcome_used_in_selection": False,
+        "approach_utility_rule": "per_ghost_first_target_hit_discounted_reward",
+        "approach_selection_rule": "context_probability_accuracy_by_stable_ghost_id",
+        "approach_selection_uses_context_actions": True,
+        "approach_outcome_used_in_selection": False,
         "selected_beta_model": full_model["selected_model"],
         "beta_by_player": full_model["beta_by_player"],
         "shared_beta": full_model["shared_beta"],

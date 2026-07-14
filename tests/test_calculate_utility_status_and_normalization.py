@@ -11,6 +11,7 @@ import pandas as pd
 from LoPS.calculate_utility.processing import (
     CalculateUtilityConfig,
     add_temporary_arrive_direction,
+    approach_target_q_for_row,
     append_normalized_q_columns,
     build_player_alive_mask,
     build_player_view,
@@ -114,6 +115,54 @@ class CalculateUtilityStatusAndNormalizationTests(unittest.TestCase):
         self.assertEqual(raw_matrix[0][1], 1.0)
         self.assertEqual(normalized_matrix[0][1], 1.0)
         self.assertTrue(np.isneginf(raw_matrix[0][0]))
+
+    def test_approach_candidates_keep_ghost_targets_separate(self) -> None:
+        """验证每个 Approach 候选只根据自己的 ghost 目标产生方向偏好。
+
+        输入语义：在五格直线上把 Pacman 放在中间，两只 scared ghost 分居左右。
+        输出语义：Ghost1 候选只偏好右侧，Ghost2 候选只偏好左侧。
+        关键约束：其它 ghost 既不提供奖励，也不被当成未来路径上的静态障碍；两个
+        候选必须保持相反且相互独立的目标方向。
+        """
+
+        positions = [(index, 0) for index in range(5)]
+        adjacent_map = {
+            position: {
+                "left": (position[0] - 1, 0) if position[0] > 0 else np.nan,
+                "right": (position[0] + 1, 0) if position[0] < 4 else np.nan,
+                "up": np.nan,
+                "down": np.nan,
+            }
+            for position in positions
+        }
+        distance_map = {
+            source: {target: abs(source[0] - target[0]) for target in positions}
+            for source in positions
+        }
+        map_data = MapData(adjacent_map, distance_map, {1: 2, 2: 4, 8: 8, 9: 8})
+        row = pd.Series(
+            {
+                "pacmanPos": (2, 0),
+                "ghost1Pos": (4, 0),
+                "ghost2Pos": (0, 0),
+                "ifscared1": 4,
+                "ifscared2": 4,
+            }
+        )
+
+        raw_matrix, normalized_matrix, metadata = approach_target_q_for_row(
+            row,
+            map_data,
+            adjacent_map,
+            CalculateUtilityConfig(),
+        )
+
+        self.assertEqual([item["target_id"] for item in metadata], ["ghost1", "ghost2"])
+        self.assertEqual(len(raw_matrix), 2)
+        self.assertGreater(raw_matrix[0][1], raw_matrix[0][0])
+        self.assertGreater(raw_matrix[1][0], raw_matrix[1][1])
+        self.assertEqual(normalized_matrix[0][1], 1.0)
+        self.assertEqual(normalized_matrix[1][0], 1.0)
 
     def test_tunnel_side_beans_are_not_clustered_across_two_empty_tiles(self) -> None:
         """验证 tunnel 两侧豆子不会跨越坐标 0 和 29 合并。

@@ -36,7 +36,7 @@ PYTHONPATH=src python script/constant_map/generate_map_constants.py --workers 8
 
 ## 视频检查
 
-当前只保留 tile 策略视频入口：
+### Tile 视频
 
 ```bash
 PYTHONPATH=src python script/pacman_video/run_tile_video_renderer.py \
@@ -51,6 +51,30 @@ PYTHONPATH=src python script/pacman_video/run_tile_video_renderer.py \
 当前视频入口要求输入同时包含 P1/P2 的策略来源字段，因此只能直接绘制双人结果；
 主分析流程本身仍支持不补 P2 列的单人文件。视频为完整显示 Ghost House 内部，会在
 分析地图常量之外额外把固定鬼屋内部格子画成白色背景，该显示补充不会修改分析图结构。
+
+### Frame 视频
+
+Frame 视频直接使用 02 的逐帧像素状态，并在 strategy 模式下按
+``DayTrial + Step`` 将 07 的 P1/P2 修正策略扩展到原始帧：
+
+```bash
+PYTHONPATH=src python script/pacman_video/run_render_table.py \
+  --task comp --session <session> --display-mode strategy
+
+PYTHONPATH=src python script/pacman_video/run_frame_renderer.py \
+  --task comp --session <session> --trial <DayTrial> \
+  --display-mode strategy
+
+PYTHONPATH=src python script/pacman_video/run_video_renderer.py \
+  --task comp --session <session> --display-mode strategy --fps 60 --overwrite
+```
+
+``none`` 模式只依赖 02；``strategy`` 模式读取 02 和 07。两种模式均自动识别单人或
+双人字段，单人文件不会补 P2。``grammar`` 入口和绘制接口暂时保留，但当前 11 输出
+没有可直接映射到原始帧的 ``DayTrial + Step``，因此尚未接入。图片和视频分别写入
+`data/pacman_video/frame_images/<mode>` 与 `data/pacman_video/frame_video/<mode>`，
+图片编号从 `000000.jpg` 开始。
+视频默认使用 60 FPS，即恢复代码原 30 FPS 的两倍。
 
 ## 运行约束
 

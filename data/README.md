@@ -78,6 +78,25 @@ PYTHONPATH=src python script/pacman_video/run_tile_video_renderer.py \
 固定 Ghost House 内部显示区域补成白色空位；这些显示用格子不写回
 `map_constants.pkl`，也不参与 utility 或连通性计算。
 
+## Frame 视频
+
+Frame 视频分为 render table、JPG 渲染和 MP4 合成三个步骤：
+
+```bash
+PYTHONPATH=src python script/pacman_video/run_render_table.py \
+  --task comp --session <session> --display-mode strategy
+PYTHONPATH=src python script/pacman_video/run_frame_renderer.py \
+  --task comp --session <session> --trial <DayTrial> --display-mode strategy
+PYTHONPATH=src python script/pacman_video/run_video_renderer.py \
+  --task comp --session <session> --display-mode strategy --fps 60 --overwrite
+```
+
+render table 写入 `pacman_video/frame_render_data/<task>/<session>.pkl`。strategy
+模式把 07 的每位玩家策略按同一 trial 的 Step 前向延续到 02 原始帧；none 模式只读取
+02。JPG 和 MP4 分别写入 `pacman_video/frame_images/<mode>` 和
+`pacman_video/frame_video/<mode>`。当前 grammar 模式只保留接口，尚未接入 11 输出。
+视频默认按 60 FPS 合成，即原 30 FPS 的两倍。
+
 ## 后续阶段
 
 `08_extract_features_human.py` 至 `12_divide_person.py` 暂时保留，但尚未形成从当前

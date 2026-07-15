@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("subject", help="被试名前缀，例如 041122-403。")
     parser.add_argument("frame_root", type=Path, help="JPG 图片帧根目录。")
     parser.add_argument("video_root", type=Path, help="MP4 视频输出根目录。")
-    parser.add_argument("--fps", type=float, default=30.0, help="输出视频帧率，默认 30。")
+    parser.add_argument("--fps", type=float, default=60.0, help="输出视频帧率，默认 60（原 30 FPS 的两倍）。")
     parser.add_argument("--crf", type=int, default=18, help="H.264 质量参数，0-51，越小质量越高。默认 18。")
     parser.add_argument(
         "--preset",
@@ -180,9 +180,9 @@ def build_ffmpeg_command(
 ) -> tuple[list[str], Path | None]:
     """构造 ffmpeg 命令。
 
-    标准渲染输出是连续的 ``00001.jpg``、``00002.jpg``。这种情况使用 image2
-    pattern，速度最快；如果图片命名不连续，则自动退回 concat list，保证仍能
-    按自然排序合成视频。
+    标准渲染输出是连续的固定位数数字 JPG，例如当前 0-based 的
+    ``000000.jpg``、``000001.jpg``。这种情况使用 image2 pattern，速度最快；
+    如果图片命名不连续，则自动退回 concat list，保证仍能按自然排序合成视频。
     """
 
     common_args = [
@@ -210,7 +210,7 @@ def build_ffmpeg_command(
 
     sequence = numeric_sequence(frame_paths)
     if sequence is not None:
-        start_number, _end_number = sequence
+        start_number, _end_number, digit_width = sequence
         return (
             common_args + [
                 "-framerate",
@@ -218,7 +218,7 @@ def build_ffmpeg_command(
                 "-start_number",
                 str(start_number),
                 "-i",
-                str(game_dir / "%05d.jpg"),
+                str(game_dir / f"%0{digit_width}d.jpg"),
             ] + encoding_args,
             None,
         )
@@ -239,14 +239,26 @@ def build_ffmpeg_command(
     )
 
 
-def numeric_sequence(frame_paths: list[Path]) -> tuple[int, int] | None:
-    """判断图片是否是连续的五位数字 JPG 序列。"""
+def numeric_sequence(frame_paths: list[Path]) -> tuple[int, int, int] | None:
+    """判断图片是否是连续的固定位数数字 JPG 序列。
+
+    输入语义：``frame_paths`` 已按自然顺序排列，可以使用五位历史编号或当前六位
+    0-based 编号。
+    输出语义：连续时返回 ``(起始编号, 结束编号, 数字宽度)``，否则返回 None。
+    关键约束：所有文件必须使用同一宽度和小写 ``.jpg``，避免 image2 pattern
+    因混合命名而漏帧。
+    """
 
     numbers: list[int] = []
+    digit_width: int | None = None
     for path in frame_paths:
-        if path.suffix.lower() != ".jpg" or not path.stem.isdigit() or len(path.stem) != 5:
+        if path.suffix.lower() != ".jpg" or not path.stem.isdigit():
             return None
-        if path.name != f"{int(path.stem):05d}.jpg":
+        if digit_width is None:
+            digit_width = len(path.stem)
+        if len(path.stem) != digit_width:
+            return None
+        if path.name != f"{int(path.stem):0{digit_width}d}.jpg":
             return None
         numbers.append(int(path.stem))
 
@@ -255,7 +267,9 @@ def numeric_sequence(frame_paths: list[Path]) -> tuple[int, int] | None:
     expected = list(range(numbers[0], numbers[-1] + 1))
     if numbers != expected:
         return None
-    return numbers[0], numbers[-1]
+    if digit_width is None:
+        return None
+    return numbers[0], numbers[-1], digit_width
 
 
 def write_concat_file(frame_paths: list[Path], fps: float) -> Path:

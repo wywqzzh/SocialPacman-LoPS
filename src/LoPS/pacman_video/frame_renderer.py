@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""不依赖 MATLAB/Psychtoolbox 的 Pacman 帧渲染器。
+"""不依赖 MATLAB/Psychtoolbox 的单人/双人 Pacman 逐帧渲染器。
 
-脚本读取 ``prepare_render_data.py`` 生成的 merged frame PKL，使用 Pillow
-直接绘制地图、豆子、Pacman、ghost、Actual/Model 方向箭头和底部信息 bar。
-底部信息 bar 可通过 ``--bar-type`` 选择 grammar、strategy 或不画。当前默认
-render table 已经只保留两个鬼 trial；如果输入仍包含四鬼 trial，
-本渲染器也只绘制 g1/g2，因为视觉样式是按旧两鬼结果图复现的。
+脚本读取当前 02 frame 数据生成的 render table，使用 Pillow 绘制地图、豆子、
+一个或两个 Pacman、两只 ghost 和可选的策略/grammar 信息条。显示模式支持
+``none``、``strategy`` 和 ``grammar``；当前正式调试覆盖前两种模式。
 """
 
 from __future__ import annotations
@@ -28,8 +26,9 @@ DIR_LEFT = 1
 DIR_DOWN = 2
 DIR_RIGHT = 3
 
-# 原始 Map 是 29 x 36 的 tile 字符串；输出画布按旧结果图比例固定。
-NUM_COLS = 29
+# 当前主流程 Map 是 28 x 36 的 tile 字符串；输出画布继续按旧结果图比例固定，
+# 玩家和 ghost 使用 02 中的原始像素坐标，不依赖这里重新换算 tile 坐标。
+NUM_COLS = 28
 NUM_ROWS = 36
 BASE_TILE = 25
 BASE_WIDTH = 812
@@ -68,6 +67,14 @@ GRAM_LABEL_COLORS = {
     "no energizer": (203, 203, 60),
 }
 BAR_TYPE_CHOICES = {"grammar", "strategy", "none"}
+PLAYER_COLORS = {
+    # P1 完整保留原 frame renderer 的颜色；P2 只替换主体颜色，几何、描边、
+    # 嘴部动画和逐帧位置计算全部复用同一绘制函数。
+    "p1": ((255, 238, 16, 245), (255, 255, 120, 190)),
+    "p2": ((70, 202, 62, 245), (157, 245, 144, 210)),
+}
+
+
 @dataclass
 class Point:
     """墙体轮廓追踪过程中的控制点。
@@ -473,7 +480,13 @@ class PacmanRenderer:
         return (int(round(x * self.aa)), int(round(y * self.aa)))
 
     def render(self, row: pd.Series) -> Image.Image:
-        """把 render table 的一行数据绘制成一张 RGB 图片。"""
+        """把 render table 的一行数据绘制成一张 RGB 图片。
+
+        输入语义：行中必须包含 P1 和两只 ghost 的逐帧像素字段；P2 字段可选。
+        输出语义：返回固定 812×1170 的 RGB 图片。
+        关键约束：只有完整存在 P2 绘图字段时才绘制第二位玩家，单人数据不会生成
+        或访问任何虚假的 P2 占位值。
+        """
 
         image = Image.new("RGB", (self.width, self.height), (0, 0, 0))
         draw = ImageDraw.Draw(image, "RGBA")
@@ -500,13 +513,9 @@ class PacmanRenderer:
             int(row["g2ModeR"]) in {2, 3},
             (255, 188, 91, 230),
         )
-        self._draw_pacman(
-            draw,
-            row["ppX"] * self.aa + self.board_x_offset,
-            row["ppY"] * self.aa,
-            direction_enum(row["pDir"]),
-            int(row["pFrame"]),
-        )
+        self._draw_player(draw, row, "p1")
+        if all(column in row.index for column in ("p2_ppX", "p2_ppY", "p2_pDir", "p2_pFrame")):
+            self._draw_player(draw, row, "p2")
         self._draw_hud(draw, row)
         self._draw_selected_bar(draw, row)
 
@@ -578,21 +587,68 @@ class PacmanRenderer:
             fill=(0, 0, 0, 255),
         )
 
-    def _draw_pacman(self, draw: ImageDraw.ImageDraw, x: float, y: float, dir_enum: int, frame: int) -> None:
-        """绘制 Pacman，嘴巴开合由 pFrame 控制。"""
+    def _draw_player(self, draw: ImageDraw.ImageDraw, row: pd.Series, player: str) -> None:
+        """读取并绘制一位玩家的当前逐帧状态。
+
+        输入语义：``player`` 为 p1 或 p2，行中包含对应像素位置、朝向和动画帧。
+        输出语义：直接在当前高分辨率画布上绘制角色。
+        关键约束：坐标缺失或非有限值时跳过该玩家；P1/P2 都使用原始 frame
+        renderer 的 Pacman 形状和嘴部动画，不根据 alive/mode 改变视觉元素。
+        """
+
+        x_value = pd.to_numeric(pd.Series([row.get(f"{player}_ppX")]), errors="coerce").iloc[0]
+        y_value = pd.to_numeric(pd.Series([row.get(f"{player}_ppY")]), errors="coerce").iloc[0]
+        if not np.isfinite(x_value) or not np.isfinite(y_value):
+            return
+
+        fill, outline = PLAYER_COLORS[player]
+        try:
+            animation_frame = int(row.get(f"{player}_pFrame", 0))
+        except (TypeError, ValueError):
+            animation_frame = 0
+        self._draw_pacman(
+            draw,
+            float(x_value) * self.aa + self.board_x_offset,
+            float(y_value) * self.aa,
+            direction_enum(row.get(f"{player}_pDir")),
+            animation_frame,
+            fill=fill,
+            outline=outline,
+        )
+
+    def _draw_pacman(
+        self,
+        draw: ImageDraw.ImageDraw,
+        x: float,
+        y: float,
+        dir_enum: int,
+        frame: int,
+        *,
+        fill: tuple[int, int, int, int],
+        outline: tuple[int, int, int, int],
+    ) -> None:
+        """使用原 frame renderer 的形状和嘴部动画绘制一位 Pacman。
+
+        输入语义：``x/y`` 是已缩放像素坐标，``dir_enum/frame`` 保留当前逐帧动画接口，
+        ``fill/outline`` 只用于区分 P1 与新增的 P2。
+        输出语义：直接修改绘图上下文。
+        关键约束：半径、垂直偏移、描边宽度、嘴部角度和动画节奏均保持原实现；
+        新增 P2 时只由调用方传入不同主体颜色。
+        """
 
         radius = self.tile * 0.9
         cx = x
         cy = y + self.scale
         draw.ellipse(
             [cx - radius, cy - radius, cx + radius, cy + radius],
-            fill=(255, 238, 16, 245),
-            outline=(255, 255, 120, 190),
+            fill=fill,
+            outline=outline,
             width=max(1, int(1.2 * self.aa)),
         )
         if dir_enum < 0:
             return
 
+        # 原动画每四个 pFrame 在两种开口角度间切换；P1/P2 使用完全相同的节奏。
         body_angle = 330 - (math.floor(frame / 4) % 2) * 30
         mouth = math.radians(360 - body_angle)
         direction_angle = {
@@ -601,8 +657,14 @@ class PacmanRenderer:
             DIR_LEFT: math.pi,
             DIR_UP: -math.pi / 2,
         }[dir_enum]
-        p1 = (cx + radius * 1.15 * math.cos(direction_angle - mouth / 2), cy + radius * 1.15 * math.sin(direction_angle - mouth / 2))
-        p2 = (cx + radius * 1.15 * math.cos(direction_angle + mouth / 2), cy + radius * 1.15 * math.sin(direction_angle + mouth / 2))
+        p1 = (
+            cx + radius * 1.15 * math.cos(direction_angle - mouth / 2),
+            cy + radius * 1.15 * math.sin(direction_angle - mouth / 2),
+        )
+        p2 = (
+            cx + radius * 1.15 * math.cos(direction_angle + mouth / 2),
+            cy + radius * 1.15 * math.sin(direction_angle + mouth / 2),
+        )
         draw.polygon([(cx, cy), p1, p2], fill=(0, 0, 0, 255))
 
     def _draw_ghost(
@@ -765,38 +827,75 @@ class PacmanRenderer:
             self._draw_text_fit_centered(draw, label, rect, self.font_label, (255, 255, 255, 245))
 
     def _draw_strategy_bar(self, draw: ImageDraw.ImageDraw, row: pd.Series) -> None:
-        """绘制 strategy bar。
+        """绘制单人或双人的当前 07 修正策略条。
 
-        当前 render table 中 strategy 通常保存为 ``fitted_label``。为了兼容旧数据，
-        如果存在 ``strategy`` 字段也可以读取；两者都不存在或当前值为空时跳过。
+        输入语义：当前 render table 使用 ``p1_display_strategy`` 和可选的
+        ``p2_display_strategy``；旧 ``fitted_label`` 仅作为单人兼容回退。
+        输出语义：单人策略块居中，双人策略块分别位于左、右两侧并标记 P1/P2。
+        关键约束：两位玩家的色块不能相连，以免被误读为同一玩家的连续 grammar token。
         """
 
-        label_value = row.get("fitted_label")
-        if label_value is None or pd.isna(label_value):
-            label_value = row.get("strategy")
-        if label_value is None or pd.isna(label_value):
-            return
+        labels: list[tuple[str, str]] = []
+        for player, player_label in (("p1", "P1"), ("p2", "P2")):
+            column = f"{player}_display_strategy"
+            if column not in row.index:
+                continue
+            value = row.get(column)
+            if value is None or pd.isna(value):
+                continue
+            label = clean_label(value).strip().lower().replace(" ", "_")
+            if label != "unknown":
+                labels.append((player_label, label))
+        if not labels:
+            legacy_value = row.get("fitted_label")
+            if legacy_value is None or pd.isna(legacy_value):
+                return
+            labels = [("P1", clean_label(legacy_value).strip().lower().replace(" ", "_"))]
 
-        label = clean_label(label_value)
-        if label == "unknown":
-            return
-
-        color = self._label_color(label)
         top = GRAM_BAR_Y * self.aa
         height = GRAM_BAR_HEIGHT * self.aa
         padding = 30 * self.aa
-        text_width = self._text_size(draw, label, self.font_label)[0]
-        width = min(GRAM_BAR_MAX_WIDTH * self.aa, max(180 * self.aa, text_width + padding * 2))
-        left = (self.width - width) / 2
-        rect = [left, top, left + width, top + height]
-        draw.rounded_rectangle(rect, radius=4 * self.aa, fill=color + (238,))
-        draw.rounded_rectangle(
-            rect,
-            radius=4 * self.aa,
-            outline=(255, 255, 255, 255),
-            width=max(2, int(2.0 * self.aa)),
+        gap = 44 * self.aa if len(labels) == 2 else 0
+        max_item_width = (
+            (GRAM_BAR_MAX_WIDTH * self.aa - gap) / 2
+            if len(labels) == 2
+            else GRAM_BAR_MAX_WIDTH * self.aa
         )
-        self._draw_text_fit_centered(draw, label, rect, self.font_label, (255, 255, 255, 245))
+        display_labels = [
+            strategy_name.replace("_", " ")
+            if len(labels) == 1
+            else f"{player_label}  {strategy_name.replace('_', ' ')}"
+            for player_label, strategy_name in labels
+        ]
+        widths = [
+            min(
+                max_item_width,
+                max(180 * self.aa, self._text_size(draw, text, self.font_label)[0] + padding * 2),
+            )
+            for text in display_labels
+        ]
+        total_width = sum(widths) + gap * (len(widths) - 1)
+        left = (self.width - total_width) / 2
+
+        x0 = left
+        for (_player_label, strategy_name), display_name, width in zip(labels, display_labels, widths):
+            rect = [x0, top, x0 + width, top + height]
+            color = self._label_color(strategy_name)
+            draw.rounded_rectangle(rect, radius=4 * self.aa, fill=color + (238,))
+            draw.rounded_rectangle(
+                rect,
+                radius=4 * self.aa,
+                outline=(255, 255, 255, 255),
+                width=max(2, int(2.0 * self.aa)),
+            )
+            self._draw_text_fit_centered(
+                draw,
+                display_name,
+                rect,
+                self.font_label,
+                (255, 255, 255, 245),
+            )
+            x0 += width + gap
 
     def _draw_arrow(self, draw: ImageDraw.ImageDraw, direction: str | None, cx: float, cy: float, size: float) -> None:
         """绘制标准对称方向箭头；方向缺失时不画任何占位符。"""
@@ -900,8 +999,10 @@ class PacmanRenderer:
             "local": (215, 25, 28),
             "vague": (173, 173, 173),
             "stay": (25, 25, 25),
-            "no energizer": (214, 217, 49),
             "evade": (254, 175, 97),
+            "evade_blinky": (196, 81, 92),
+            "evade_clyde": (255, 208, 125),
+            "no_energizer": (214, 217, 49),
         }.get(normalized, (95, 130, 190))
 
 
@@ -924,11 +1025,12 @@ def load_render_rows(
     # 这些是画出游戏帧的最低字段；grammar/方向不是必需列，因为可能有些帧无标注。
     required_columns = {
         "DayTrial",
+        "Step",
         "Map",
-        "ppX",
-        "ppY",
-        "pDir",
-        "pFrame",
+        "p1_ppX",
+        "p1_ppY",
+        "p1_pDir",
+        "p1_pFrame",
         "g1pX",
         "g1pY",
         "g1Dir",
@@ -945,6 +1047,12 @@ def load_render_rows(
     missing_columns = sorted(required_columns - set(merged.columns))
     if missing_columns:
         raise ValueError(f"{data_path} 缺少渲染所需列：{missing_columns}")
+
+    # P2 必须是完整玩家记录；部分字段通常意味着上游文件损坏，不能悄悄退回单人模式。
+    p2_columns = {"p2_ppX", "p2_ppY", "p2_pDir", "p2_pFrame"}
+    present_p2_columns = p2_columns & set(merged.columns)
+    if present_p2_columns and present_p2_columns != p2_columns:
+        raise ValueError(f"{data_path} 的 P2 绘图字段不完整，缺少：{sorted(p2_columns - present_p2_columns)}")
     if trial:
         merged = merged[merged["DayTrial"].astype(str) == trial]
         if merged.empty:
@@ -1002,16 +1110,17 @@ def load_data(args: argparse.Namespace) -> pd.DataFrame:
 def iter_output_paths(rows: pd.DataFrame, output_dir: Path, subject: str | None = None) -> Iterable[tuple[int, pd.Series, Path]]:
     """为每一帧生成输出路径。
 
-    输出目录结构固定为 ``{output_dir}/{subject}/{DayTrial}/00001.jpg``，并且每个
-    trial 单独从 00001 开始编号。
+    输出目录结构固定为 ``{output_dir}/{subject}/{DayTrial}/000000.jpg``，并且每个
+    trial 单独从 0 开始编号。
     """
 
     counters: dict[str, int] = {}
     subject_dir = output_dir / sanitize_name(subject) if subject else output_dir
     for i, row in rows.iterrows():
         trial = sanitize_name(str(row["DayTrial"]))
-        counters[trial] = counters.get(trial, 0) + 1
-        path = subject_dir / trial / f"{counters[trial]:05d}.jpg"
+        frame_number = counters.get(trial, 0)
+        counters[trial] = frame_number + 1
+        path = subject_dir / trial / f"{frame_number:06d}.jpg"
         yield i, row, path
 
 

@@ -61,6 +61,42 @@ CODE_TO_DIRECTION = {value: key for key, value in DIRECTION_TO_CODE.items()}
 # 模型 Q 矩阵的列顺序来自旧脚本 ``_getDir``：left/right/up/down。
 MODEL_DIRECTION_ORDER = ["left", "right", "up", "down"]
 
+# 当前 02 frame 数据对每位玩家保存独立的像素位置、朝向和动画帧。P2 的这组字段
+# 必须完整出现或完整缺失，据此可以稳定地区分双人和单人数据。
+CURRENT_PLAYER_RENDER_COLUMNS = {
+    "p1": ("p1_ppX", "p1_ppY", "p1_pDir", "p1_pFrame"),
+    "p2": ("p2_ppX", "p2_ppY", "p2_pDir", "p2_pFrame"),
+}
+
+# 07 同时保留模型原始策略和规则修正策略。frame 视频优先展示最终修正名称；
+# 只有名称不存在时才回退到数字编码，避免重新实现一套策略选择逻辑。
+CURRENT_STRATEGY_COLUMNS = {
+    "p1": (
+        "p1_revised_strategy_name",
+        "p1_strategy_name",
+        "p1_revised_strategy",
+        "p1_strategy",
+    ),
+    "p2": (
+        "p2_revised_strategy_name",
+        "p2_strategy_name",
+        "p2_revised_strategy",
+        "p2_strategy",
+    ),
+}
+
+CURRENT_STRATEGY_NUMBER_TO_NAME = {
+    0: "global",
+    1: "local",
+    2: "evade_blinky",
+    3: "evade_clyde",
+    6: "approach",
+    7: "energizer",
+    8: "no_energizer",
+    9: "vague",
+    10: "stay",
+}
+
 
 class DataProcessingError(RuntimeError):
     """数据处理失败时抛出的明确异常。"""
@@ -98,6 +134,227 @@ class ProcessingSummary:
     model_dir_missing: int
     actual_dir_missing: int
     outputs: dict[str, str]
+
+
+@dataclass(frozen=True)
+class CurrentRenderTableSummary:
+    """记录当前主流程 frame render table 的生成摘要。
+
+    输入语义：由 :func:`build_current_render_table` 在保存完成后构造。
+    输出语义：向 CLI 和测试提供玩家数量、逐帧行数、trial 数量及策略缺失统计。
+    关键约束：摘要不保存完整 DataFrame，避免调用方无意复制大型逐帧数据。
+    """
+
+    frame_path: str
+    strategy_path: str | None
+    output_path: str
+    display_mode: str
+    player_count: int
+    frame_rows: int
+    trial_count: int
+    missing_strategy_trials: dict[str, list[str]]
+    missing_strategy_frames: dict[str, int]
+
+
+def build_current_render_table(
+    frame_path: Path,
+    output_path: Path,
+    *,
+    display_mode: str,
+    strategy_path: Path | None = None,
+) -> CurrentRenderTableSummary:
+    """从当前 02/07 主流程数据生成逐帧渲染表。
+
+    输入语义：``frame_path`` 指向 02 逐帧数据，``strategy_path`` 在 strategy
+    模式下指向同一 task/session 的 07 tile/context 结果；``display_mode`` 支持
+    ``none``、``strategy`` 和 ``grammar``。
+    输出语义：保存与 02 行数和顺序完全一致的 pickle，并返回轻量摘要。
+    关键约束：单人输入不会补 P2 列；strategy 标签只在同一 DayTrial 内按 Step
+    前向延续。当前 11 grammar 结果没有逐帧定位信息，因此 grammar 模式只保留
+    renderer 接口，不能在此函数中自动构造。
+    """
+
+    normalized_mode = str(display_mode).strip().lower()
+    if normalized_mode not in {"none", "strategy", "grammar"}:
+        raise DataProcessingError(
+            f"display_mode 只支持 none、strategy 或 grammar，当前值：{display_mode!r}"
+        )
+    if not frame_path.is_file():
+        raise DataProcessingError(f"找不到 02 frame 数据：{frame_path}")
+    if normalized_mode == "grammar":
+        raise DataProcessingError(
+            "grammar 显示接口已经保留，但当前 11 grammar 输出没有 DayTrial/Step，"
+            "暂时不能自动对齐到逐帧数据。"
+        )
+
+    frame_df = read_frame_table(frame_path)
+    player_count = validate_current_frame_table(frame_df, str(frame_path))
+    render_df = frame_df.copy()
+    missing_trials = {player: [] for player in ("p1", "p2")[:player_count]}
+
+    if normalized_mode == "strategy":
+        if strategy_path is None or not strategy_path.is_file():
+            raise DataProcessingError(f"strategy 模式找不到对应的 07 数据：{strategy_path}")
+        strategy_df = pd.read_pickle(strategy_path)
+        render_df, missing_trials = align_current_strategies_to_frames(
+            frame_df,
+            strategy_df,
+            player_count=player_count,
+            source_name=str(strategy_path),
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    render_df.to_pickle(output_path)
+    missing_frames = {
+        player: int(render_df[f"{player}_display_strategy"].isna().sum())
+        if f"{player}_display_strategy" in render_df.columns
+        else 0
+        for player in ("p1", "p2")[:player_count]
+    }
+    return CurrentRenderTableSummary(
+        frame_path=str(frame_path.resolve()),
+        strategy_path=str(strategy_path.resolve()) if strategy_path is not None else None,
+        output_path=str(output_path.resolve()),
+        display_mode=normalized_mode,
+        player_count=player_count,
+        frame_rows=int(len(render_df)),
+        trial_count=int(render_df["DayTrial"].nunique()),
+        missing_strategy_trials=missing_trials,
+        missing_strategy_frames=missing_frames,
+    )
+
+
+def validate_current_frame_table(frame_df: pd.DataFrame, source_name: str) -> int:
+    """校验当前 02 frame 表并返回玩家数量。
+
+    输入语义：``frame_df`` 是 02 输出，``source_name`` 仅用于错误信息。
+    输出语义：返回 1 或 2。
+    关键约束：P1 绘图字段必须完整存在；P2 字段必须完整出现或完整缺失，不能把
+    部分损坏的双人表误判成单人数据。
+    """
+
+    _require_columns(frame_df, ["DayTrial", "Step", "Map"], source_name)
+    _require_columns(frame_df, CURRENT_PLAYER_RENDER_COLUMNS["p1"], source_name)
+    if frame_df.empty:
+        raise DataProcessingError(f"02 frame 数据为空：{source_name}")
+
+    p2_columns = set(CURRENT_PLAYER_RENDER_COLUMNS["p2"])
+    present_p2_columns = p2_columns & set(frame_df.columns)
+    if present_p2_columns and present_p2_columns != p2_columns:
+        missing = sorted(p2_columns - present_p2_columns)
+        raise DataProcessingError(f"{source_name} 的 P2 绘图字段不完整，缺少：{missing}")
+    return 2 if present_p2_columns == p2_columns else 1
+
+
+def align_current_strategies_to_frames(
+    frame_df: pd.DataFrame,
+    strategy_df: pd.DataFrame,
+    *,
+    player_count: int,
+    source_name: str,
+) -> tuple[pd.DataFrame, dict[str, list[str]]]:
+    """把当前 07 每位玩家的 tile 策略扩展到 02 原始帧。
+
+    输入语义：两个表都必须包含 0-based ``DayTrial`` 和 ``Step``；``player_count``
+    来自 02 字段检测。
+    输出语义：返回保留 02 原始行顺序的新表，并追加 ``p1_display_strategy`` 和可选
+    ``p2_display_strategy``，同时返回每位玩家缺少策略数据的 trial。
+    关键约束：第 i 条 tile 策略只覆盖同 trial 的 ``[Step_i, Step_{i+1})``；不做
+    后向填充，因此 trial 开头缺少标注时不会泄漏未来策略。
+    """
+
+    _require_columns(strategy_df, ["DayTrial", "Step"], source_name)
+    if player_count not in {1, 2}:
+        raise DataProcessingError(f"player_count 只支持 1 或 2，当前值：{player_count}")
+
+    output = frame_df.copy()
+    players = ("p1", "p2")[:player_count]
+    missing_trials: dict[str, list[str]] = {player: [] for player in players}
+    strategy_by_trial = {
+        str(trial): group.copy()
+        for trial, group in strategy_df.groupby("DayTrial", sort=False)
+    }
+
+    for player in players:
+        source_column = _find_current_strategy_column(strategy_df, player, source_name)
+        target_column = f"{player}_display_strategy"
+        output[target_column] = pd.Series([pd.NA] * len(output), index=output.index, dtype="object")
+
+        for trial, frame_group in output.groupby("DayTrial", sort=False):
+            trial_name = str(trial)
+            tile_group = strategy_by_trial.get(trial_name)
+            if tile_group is None or tile_group.empty:
+                missing_trials[player].append(trial_name)
+                continue
+
+            numeric_steps = pd.to_numeric(tile_group["Step"], errors="coerce")
+            if numeric_steps.isna().any():
+                raise DataProcessingError(f"{source_name} 的 {trial_name} 包含无法解析的 Step。")
+            if numeric_steps.duplicated().any():
+                duplicates = sorted(numeric_steps[numeric_steps.duplicated()].astype(int).unique().tolist())
+                raise DataProcessingError(
+                    f"{source_name} 的 {trial_name} 存在重复策略 Step：{duplicates[:10]}"
+                )
+
+            labels_by_step = {
+                int(step): _normalize_current_strategy_name(value)
+                for step, value in zip(numeric_steps, tile_group[source_column])
+            }
+            frame_steps = pd.to_numeric(frame_group["Step"], errors="coerce")
+            if frame_steps.isna().any():
+                raise DataProcessingError(f"02 frame 数据的 {trial_name} 包含无法解析的 Step。")
+
+            # 只在策略关键帧写入标签，再按当前 trial 前向延续；groupby 边界天然阻止
+            # 上一局的末尾策略流入下一局。
+            aligned = frame_steps.map(labels_by_step).astype("object").ffill()
+            output.loc[frame_group.index, target_column] = aligned.to_numpy(dtype=object)
+
+    return output, missing_trials
+
+
+def _find_current_strategy_column(strategy_df: pd.DataFrame, player: str, source_name: str) -> str:
+    """选择当前玩家用于视频显示的最高优先级策略列。
+
+    输入语义：``strategy_df`` 是 07 表，``player`` 为 p1 或 p2。
+    输出语义：返回实际存在的策略列名。
+    关键约束：优先规则修正后的名称，其次模型名称，最后才使用数字编码。
+    """
+
+    for column in CURRENT_STRATEGY_COLUMNS[player]:
+        if column in strategy_df.columns:
+            return column
+    raise DataProcessingError(
+        f"{source_name} 缺少 {player} 的策略字段，候选为：{list(CURRENT_STRATEGY_COLUMNS[player])}"
+    )
+
+
+def _normalize_current_strategy_name(value: object) -> object:
+    """把当前 07 的策略名称或编号规范成显示名称。
+
+    输入语义：值可以是字符串名称、整数编号或缺失值。
+    输出语义：返回统一的小写策略名；缺失或未知编号返回 ``pd.NA``。
+    关键约束：不根据 Q 或 posterior 重新推断策略，视频必须忠实展示 07 已保存结果。
+    """
+
+    if value is None:
+        return pd.NA
+    try:
+        missing = pd.isna(value)
+    except (TypeError, ValueError):
+        missing = False
+    if isinstance(missing, (bool, np.bool_)) and missing:
+        return pd.NA
+    if isinstance(value, str):
+        text = value.strip().lower().replace(" ", "_")
+        if not text or text in {"nan", "none", "unknown"}:
+            return pd.NA
+        if text == "noenergizer":
+            text = "no_energizer"
+        return text
+    try:
+        return CURRENT_STRATEGY_NUMBER_TO_NAME.get(int(value), pd.NA)
+    except (TypeError, ValueError):
+        return pd.NA
 
 
 def find_subject_paths(
